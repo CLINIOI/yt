@@ -1,0 +1,126 @@
+# main.py — Точка входа в приложение
+#
+# Порядок старта:
+#   1. Настройки HiDPI
+#   2. Загрузка config.json
+#   3. Создание обязательных папок
+#   4. Проверка окружения (StartupCheckDialog)
+#   5. Инициализация БД
+#   6. Создание MainWindow
+
+import sys
+import os
+import json
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtCore    import Qt
+from PyQt6.QtGui     import QFont
+
+BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+
+DEFAULT_CONFIG = {
+    "app":      {"window_width": 1280, "window_height": 800},
+    "paths": {
+        "downloads":   os.path.join(BASE_DIR, "downloads"),
+        "processed":   os.path.join(BASE_DIR, "processed"),
+        "backgrounds": os.path.join(BASE_DIR, "assets", "backgrounds"),
+        "banners":     os.path.join(BASE_DIR, "assets", "banners"),
+    },
+    "download":  {"max_parallel": 2, "format": "bestvideo+bestaudio/best"},
+    "processing": {},
+}
+
+
+# ──────────────────────────────────────────────────────────────────────
+
+def load_config() -> dict:
+    """Загружает config.json; при отсутствии создаёт с дефолтами."""
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    # Создаём дефолтный
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(DEFAULT_CONFIG, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+    return dict(DEFAULT_CONFIG)
+
+
+def ensure_dirs(config: dict):
+    """Создаёт папки из config.paths, если их ещё нет."""
+    paths = config.get("paths", {})
+    for key, path in paths.items():
+        if path:
+            try:
+                os.makedirs(path, exist_ok=True)
+            except Exception:
+                pass
+    # Всегда создаём data/
+    os.makedirs(os.path.join(BASE_DIR, "data"), exist_ok=True)
+
+
+def init_db():
+    """Инициализирует БД (создаёт таблицы при первом запуске)."""
+    try:
+        from db import db  # noqa — вызов создаёт таблицы через _create_tables()
+        _ = db
+    except Exception as e:
+        raise RuntimeError(f"Не удалось инициализировать базу данных:\n{e}") from e
+
+
+# ──────────────────────────────────────────────────────────────────────
+
+def main():
+    # 1. HiDPI
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+    )
+
+    app = QApplication(sys.argv)
+    app.setApplicationName("YT Manager")
+    app.setApplicationVersion("0.1.0")
+
+    # Системный шрифт
+    font = QFont("Segoe UI", 10)
+    font.setHintingPreference(QFont.HintingPreference.PreferDefaultHinting)
+    app.setFont(font)
+
+    # 2. Конфиг
+    config = load_config()
+
+    # 3. Папки
+    ensure_dirs(config)
+
+    # 4. Проверка окружения
+    try:
+        from startup_check import show_startup_check
+        should_start = show_startup_check(BASE_DIR)
+        if not should_start:
+            sys.exit(0)
+    except Exception:
+        pass  # если startup_check недоступен — продолжаем
+
+    # 5. БД
+    try:
+        init_db()
+    except RuntimeError as e:
+        QMessageBox.critical(None, "Критическая ошибка", str(e))
+        sys.exit(1)
+
+    # 6. Главное окно
+    from ui_main import MainWindow
+    window = MainWindow(config)
+    window.show()
+
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

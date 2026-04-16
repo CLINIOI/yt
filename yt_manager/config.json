@@ -1,0 +1,21 @@
+{
+  "_comment": "Конфигурация приложения. Редактируется через UI или вручную.",
+  "app": {
+    "theme": "dark",
+    "language": "ru",
+    "window_width": 1280,
+    "window_height": 800
+  },
+  "paths": {
+    "downloads": "./downloads",
+    "processed": "./processed",
+    "backgrounds": "./assets/backgrounds",
+    "banners": "./assets/banners",
+    "database": "./data/app.db"
+  },
+  "download": {
+    "default_format": "mp4",
+    "default_quality": "1080p",
+    "max_concurrent": 2
+  }
+}
