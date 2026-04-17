@@ -21,6 +21,9 @@ from PyQt6.QtGui     import QFont
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 
+# Всегда работаем относительно папки проекта
+os.chdir(BASE_DIR)
+
 DEFAULT_CONFIG = {
     "app":      {"window_width": 1280, "window_height": 800},
     "paths": {
@@ -71,8 +74,17 @@ def init_db():
     try:
         from db import db  # noqa — вызов создаёт таблицы через _create_tables()
         _ = db
+    except RuntimeError:
+        raise
     except Exception as e:
-        raise RuntimeError(f"Не удалось инициализировать базу данных:\n{e}") from e
+        import traceback
+        details = traceback.format_exc()
+        raise RuntimeError(
+            f"Не удалось инициализировать базу данных:\n{e}\n\n"
+            f"Путь к проекту: {BASE_DIR}\n"
+            f"Права на запись: {os.access(BASE_DIR, os.W_OK)}\n\n"
+            f"Полная ошибка:\n{details}"
+        ) from e
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -111,7 +123,13 @@ def main():
     try:
         init_db()
     except RuntimeError as e:
-        QMessageBox.critical(None, "Критическая ошибка", str(e))
+        from PyQt6.QtWidgets import QTextEdit
+        msg = QMessageBox(None)
+        msg.setIcon(QMessageBox.Icon.Critical)
+        msg.setWindowTitle("Критическая ошибка")
+        msg.setText("Не удалось инициализировать базу данных")
+        msg.setDetailedText(str(e))
+        msg.exec()
         sys.exit(1)
 
     # 6. Главное окно

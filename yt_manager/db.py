@@ -9,7 +9,15 @@ import json
 from datetime import datetime
 
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "app.db")
+# Определяем путь к БД строго относительно этого файла
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH   = os.path.join(_THIS_DIR, "data", "app.db")
+
+# Гарантируем существование папки data/ при загрузке модуля
+try:
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+except OSError:
+    pass
 
 
 class Database:
@@ -20,13 +28,35 @@ class Database:
     """
 
     def __init__(self, db_path: str = DB_PATH):
-        self.db_path = db_path
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        self.db_path = os.path.abspath(db_path)
+        db_dir = os.path.dirname(self.db_path)
+        try:
+            os.makedirs(db_dir, exist_ok=True)
+        except OSError:
+            pass
 
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA foreign_keys = ON")
-        self.conn.execute("PRAGMA journal_mode = WAL")  # Лучшая производительность
+        # OneDrive/сетевые диски не поддерживают WAL — используем DELETE journal
+        for _timeout in (5000, 15000):
+            try:
+                self.conn = sqlite3.connect(
+                    self.db_path,
+                    check_same_thread=False,
+                    timeout=_timeout / 1000,
+                )
+                self.conn.row_factory = sqlite3.Row
+                self.conn.execute("PRAGMA foreign_keys = ON")
+                self.conn.execute("PRAGMA journal_mode = DELETE")
+                self.conn.execute("PRAGMA synchronous = NORMAL")
+                break
+            except Exception as _e:
+                if _timeout == 15000:
+                    raise OSError(
+                        f"SQLite не может открыть файл: {self.db_path}\n"
+                        f"Причина: {_e}\n"
+                        f"Папка существует: {os.path.isdir(os.path.dirname(self.db_path))}\n"
+                        f"Права на запись: {os.access(os.path.dirname(self.db_path), os.W_OK)}\n"
+                        f"Совет: папка на OneDrive — перенеси проект в C:\\yt_manager\\"
+                    ) from _e
         self._lock = threading.Lock()
         self._create_tables()
 
@@ -229,17 +259,43 @@ class Database:
         Добавляет видео. Если видео с таким yt_id уже есть — пропускает.
         Возвращает id новой записи или None если уже существует.
         """
-        cur = self.conn.cursor()
-        try:
-            cur.execute("""
-                INSERT OR IGNORE INTO videos
-                    (channel_id, yt_id, title, duration, thumbnail_url, upload_date, view_count)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (channel_id, yt_id, title, duration, thumbnail_url, upload_date, view_count))
-            self._commit()
-            return cur.lastrowid
-        except sqlite3.IntegrityError:
-            return None  # Видео уже существует
+        # Явное приведение типов — защита от float/None/нестандартных значений
+        def _int_or_none(v):
+            try: return int(v) if v is not None else None
+            except (TypeError, ValueError): return None
+
+        def _str_or_none(v):
+            try: return str(v)[:500] if v is not None else None
+            except Exception: return None
+
+        params = (
+            int(channel_id),
+            str(yt_id),
+            _str_or_none(title),
+            _int_or_none(duration),
+            _str_or_none(thumbnail_url),
+            _str_or_none(upload_date),
+            _int_or_none(view_count) or 0,
+        )
+
+        with self._lock:
+            cur = self.conn.cursor()
+            try:
+                cur.execute("""
+                    INSERT OR IGNORE INTO videos
+                        (channel_id, yt_id, title, duration, thumbnail_url, upload_date, view_count)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, params)
+                self.conn.commit()
+                return cur.lastrowid if cur.lastrowid else None
+            except sqlite3.IntegrityError:
+                return None  # Видео уже существует
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(
+                    "add_video failed: yt_id=%r params=%r err=%s", yt_id, params, e
+                )
+                return None
 
     def get_videos_by_channel(self, channel_id: int,
                                status: str = None) -> list:
@@ -580,4 +636,40 @@ class Database:
 # Глобальный инстанс (используется во всех модулях)
 # ─────────────────────────────────────────────────────────────────────
 
-db = Database()
+def _create_db_instance() -> "Database":
+    import sys, tempfile
+    # Пробуем основной путь
+    try:
+        _d = os.path.dirname(DB_PATH)
+        os.makedirs(_d, exist_ok=True)
+        # Проверяем что можем реально создать файл
+        _test = os.path.join(_d, ".write_test")
+        with open(_test, "w") as _f:
+            _f.write("ok")
+        os.remove(_test)
+        return Database(DB_PATH)
+    except Exception as e1:
+        print(f"[db] Основной путь недоступен: {DB_PATH}\n  Причина: {e1}", file=sys.stderr)
+
+    # Fallback: папка TEMP
+    try:
+        _tmp_dir = os.path.join(tempfile.gettempdir(), "yt_manager_data")
+        os.makedirs(_tmp_dir, exist_ok=True)
+        _fallback = os.path.join(_tmp_dir, "app.db")
+        print(f"[db] Использую резервный путь: {_fallback}", file=sys.stderr)
+        return Database(_fallback)
+    except Exception as e2:
+        raise RuntimeError(
+            f"Не удалось открыть базу данных.\n\n"
+            f"Основной путь: {DB_PATH}\n"
+            f"Ошибка: {e1}\n\n"
+            f"Резервный путь: {_fallback}\n"
+            f"Ошибка: {e2}\n\n"
+            f"Проверь:\n"
+            f"  • Права на запись в папку проекта\n"
+            f"  • Длину пути (Windows: не более 200 символов)\n"
+            f"  • Не открыт ли файл app.db в другой программе"
+        ) from e2
+
+
+db = _create_db_instance()

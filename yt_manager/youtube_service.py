@@ -115,6 +115,40 @@ class YouTubeService:
         "audio": "bestaudio[ext=m4a]/bestaudio/best",
     }
 
+    # Файл cookies.txt рядом с проектом (если есть — используется автоматически)
+    COOKIES_FILE: str = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "cookies.txt"
+    )
+
+    def _cookie_opts(self) -> dict:
+        """
+        Возвращает опции авторизации для yt-dlp.
+        Приоритет: cookies.txt → браузер (без DPAPI) → без куков.
+        """
+        # 1) Файл cookies.txt рядом с проектом
+        if os.path.isfile(self.COOKIES_FILE):
+            return {"cookiefile": self.COOKIES_FILE}
+        # 2) Браузер без DPAPI-расшифровки (Chrome 127+ совместимо)
+        try:
+            import yt_dlp.cookies as _ck
+            # Проверяем доступность chrome
+            browsers = []
+            for _br in ("chrome", "firefox", "edge", "brave", "opera"):
+                try:
+                    _ck.load_cookies_from_browser(_br)
+                    browsers.append(_br)
+                    break
+                except Exception:
+                    continue
+            if browsers:
+                return {"cookiesfrombrowser": (browsers[0],)}
+        except Exception:
+            pass
+        return {}
+
+
+
     # ── Получение инфо о канале ───────────────────────────────────────
 
     def get_channel_info(self, url: str) -> Optional[ChannelInfo]:
@@ -127,6 +161,7 @@ class YouTubeService:
             "no_warnings":  True,
             "extract_flat": "in_playlist",
             "playlistend":  5,      # достаточно для получения мета
+            **self._cookie_opts(),
         }
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -412,6 +447,7 @@ class YouTubeService:
             "writethumbnail": False,
             # Не перескачиваем уже скачанное
             "nooverwrites": True,
+            **self._cookie_opts(),
         }
 
         try:

@@ -382,6 +382,7 @@ class FolderTreeWidget(QTreeWidget):
         root_order = [
             ('downloads',   '📥  Загрузки'),
             ('processed',   '⚙   Обработанные'),
+            ('clips',       '✂   Нарезки'),
             ('backgrounds', '🖼  Фоны'),
             ('banners',     '🏷  Баннеры'),
         ]
@@ -427,8 +428,8 @@ class FolderTreeWidget(QTreeWidget):
             child.setData(0, Qt.ItemDataRole.UserRole + 1, name.lower())
             parent.addChild(child)
             self._size_items[entry.path] = child
-            # Рекурсивно только для processed (clips/merged/stacked)
-            if parent_type == 'processed':
+            # Рекурсивно для processed и clips
+            if parent_type in ('processed', 'clips'):
                 self._load_children(child, entry.path, name.lower())
 
     def _make_bold(self, item: QTreeWidgetItem):

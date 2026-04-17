@@ -11,7 +11,8 @@
     "processed": "./processed",
     "backgrounds": "./assets/backgrounds",
     "banners": "./assets/banners",
-    "database": "./data/app.db"
+    "database": "./data/app.db",
+    "clips": "./clips"
   },
   "download": {
     "default_format": "mp4",
