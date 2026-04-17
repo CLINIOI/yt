@@ -2,7 +2,7 @@
 #
 # Содержит:
 #   • Боковой навбар с иконками и статус-индикаторами
-#   • QStackedWidget со всеми пятью страницами
+#   • QStackedWidget со всеми шестью страницами
 #   • Полную маршрутизацию сигналов между страницами
 #   • Сохранение/восстановление геометрии окна
 #   • Статусную строку (активные загрузки / обработка)
@@ -19,11 +19,12 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QCloseEvent
 
-from pages.channels_page   import ChannelsPage
-from pages.processing_page import ProcessingPage
-from pages.folders_page    import FoldersPage
-from pages.stats_page      import StatsPage
-from pages.presets_page    import PresetsPage
+from pages.channels_page    import ChannelsPage
+from pages.processing_page  import ProcessingPage
+from pages.folders_page     import FoldersPage
+from pages.stats_page       import StatsPage
+from pages.presets_page     import PresetsPage
+from pages.typewriter_page  import TypewriterPage
 
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
@@ -63,6 +64,19 @@ QPushButton#nav_btn {
 QPushButton#nav_btn:hover   { background: #22211f; color: #cdccca; }
 QPushButton#nav_btn:checked { background: #253535; color: #4f98a3; font-weight: 600; }
 
+/* ── Кнопка Typewriter — особый акцент ── */
+QPushButton#nav_btn_tw {
+    background: transparent; border: none; border-radius: 8px;
+    color: #797876; font-size: 13px;
+    text-align: left; padding: 10px 16px;
+    margin: 1px 8px;
+}
+QPushButton#nav_btn_tw:hover   { background: #22211f; color: #cdccca; }
+QPushButton#nav_btn_tw:checked {
+    background: #1a2a35; color: #4f98a3; font-weight: 600;
+    border-left: 3px solid #4f98a3;
+}
+
 /* ── СТАТУСНАЯ ПАНЕЛЬ САЙДБАРА ── */
 QFrame#sidebar_status { background: #171614; border-top: 1px solid #2d2c2a; }
 QLabel#status_tool    { color: #3a3937; font-size: 11px; }
@@ -82,11 +96,12 @@ QStatusBar::item { border: none; }
 """
 
 NAV_ITEMS = [
-    ("📺", "  Каналы",     0),
-    ("⚙️", "  Обработка",  1),
-    ("📁", "  Папки",      2),
-    ("📊", "  Статистика", 3),
-    ("🎛", "  Пресеты",    4),
+    ("📺", "  Каналы",       0, "nav_btn"),
+    ("⚙️", "  Обработка",    1, "nav_btn"),
+    ("📁", "  Папки",        2, "nav_btn"),
+    ("📊", "  Статистика",   3, "nav_btn"),
+    ("🎛", "  Пресеты",      4, "nav_btn"),
+    ("🎬", "  Видео-генератор", 5, "nav_btn_tw"),
 ]
 
 # Страницы, которые обновляются при каждом переходе
@@ -104,7 +119,7 @@ class MainWindow(QMainWindow):
         self._env   = self._probe_env()
 
         self.setWindowTitle("YT Manager")
-        self.setMinimumSize(960, 620)
+        self.setMinimumSize(980, 640)
 
         self._build_ui()
         self._connect_signals()
@@ -175,7 +190,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(self._hdiv())
         lay.addSpacing(14)
 
-        # Навигация
+        # Навигация — основные инструменты
         nav_lbl = QLabel("МЕНЮ")
         nav_lbl.setObjectName("nav_section")
         lay.addWidget(nav_lbl)
@@ -185,9 +200,19 @@ class MainWindow(QMainWindow):
         self._btn_group.setExclusive(True)
         self._nav_buttons = []
 
-        for icon, label, idx in NAV_ITEMS:
+        for icon, label, idx, obj_name in NAV_ITEMS:
+            # Добавляем разделитель перед вкладкой Typewriter
+            if idx == 5:
+                lay.addSpacing(8)
+                lay.addWidget(self._hdiv())
+                lay.addSpacing(8)
+                tools_lbl = QLabel("ИНСТРУМЕНТЫ")
+                tools_lbl.setObjectName("nav_section")
+                lay.addWidget(tools_lbl)
+                lay.addSpacing(6)
+
             btn = QPushButton(f"  {icon}{label}")
-            btn.setObjectName("nav_btn")
+            btn.setObjectName(obj_name)
             btn.setCheckable(True)
             btn.setFixedHeight(40)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -213,7 +238,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(self._hdiv())
         lay.addSpacing(10)
 
-        version = QLabel("v0.1.0  ·  alpha")
+        version = QLabel("v0.2.0  ·  alpha")
         version.setObjectName("version_label")
         lay.addWidget(version)
         lay.addSpacing(14)
@@ -258,31 +283,28 @@ class MainWindow(QMainWindow):
     def _build_stack(self) -> QStackedWidget:
         self.stack = QStackedWidget()
 
-        self.page_channels   = ChannelsPage()
-        self.page_processing = ProcessingPage()
-        self.page_folders    = FoldersPage()
-        self.page_stats      = StatsPage()
-        self.page_presets    = PresetsPage()
+        self.page_channels    = ChannelsPage()
+        self.page_processing  = ProcessingPage()
+        self.page_folders     = FoldersPage()
+        self.page_stats       = StatsPage()
+        self.page_presets     = PresetsPage()
+        self.page_typewriter  = TypewriterPage()
 
         for page in [self.page_channels, self.page_processing,
-                     self.page_folders, self.page_stats, self.page_presets]:
+                     self.page_folders, self.page_stats,
+                     self.page_presets, self.page_typewriter]:
             self.stack.addWidget(page)
 
         return self.stack
 
     # ── МАРШРУТИЗАЦИЯ СИГНАЛОВ ────────────────────────────────────────
     def _connect_signals(self):
-        # Смена страницы → авто-обновление
         self.stack.currentChanged.connect(self._on_page_changed)
-
-        # Пресет применён → обработка + статусбар
         self.page_presets.preset_applied.connect(self._on_preset_applied)
 
-        # Каналы: скачивание запущено → обновить счётчик
         if hasattr(self.page_channels, "download_started"):
             self.page_channels.download_started.connect(self._refresh_dl_counter)
 
-        # Каналы: скачивание завершено → обновить папки и статистику
         if hasattr(self.page_channels, "download_finished"):
             self.page_channels.download_finished.connect(self._on_download_finished)
 
@@ -293,83 +315,66 @@ class MainWindow(QMainWindow):
             self._nav_buttons[idx].setChecked(True)
 
     def _on_page_changed(self, idx: int):
-        """Обновляем страницы при переходе на них."""
         if idx in REFRESH_ON_VISIT:
             page = self.stack.widget(idx)
             if hasattr(page, "refresh"):
                 page.refresh()
 
-    def _on_preset_applied(self, data: dict):
-        """preset_applied от PresetsPage → ProcessingPage.apply_preset."""
-        self.page_processing.apply_preset(data)
-        name = "пресет"
-        # Если в data есть мета-поле name (при желании можно добавить)
-        self._statusbar.showMessage(
-            f"✓ Пресет применён к настройкам обработки", 4000)
-        # Переходим на страницу обработки
+    def _on_preset_applied(self, preset_name: str):
+        self._statusbar.showMessage(f"Пресет «{preset_name}» применён", 4000)
         self._navigate(1)
 
-    def _on_download_finished(self, *_):
+    def _on_download_finished(self):
         self._refresh_dl_counter()
-        # Помечаем папки/статистику как «требующие обновления» при следующем визите
-        # (они обновятся автоматически через _on_page_changed)
+        if hasattr(self.page_folders, "refresh"):
+            self.page_folders.refresh()
+        if hasattr(self.page_stats, "refresh"):
+            self.page_stats.refresh()
 
-    def _refresh_dl_counter(self, *_):
-        """Обновляет счётчик активных загрузок в сайдбаре."""
+    def _refresh_dl_counter(self):
         try:
-            from download_queue import DownloadQueue
-            from db import db
-            # Считаем незавершённые задачи
-            count = len([r for r in (db.conn.execute(
-                "SELECT status FROM download_queue WHERE status IN ('pending','downloading')"
-            ).fetchall() or [])])
+            from download_queue import queue_manager
+            active = queue_manager.active_count()
+            self._dl_counter.setText(
+                f"{'⏬ ' if active else ''}Загрузок: {active}")
+            self._dl_counter.setProperty("active", "true" if active else "false")
+            self._dl_counter.style().unpolish(self._dl_counter)
+            self._dl_counter.style().polish(self._dl_counter)
         except Exception:
-            count = 0
+            pass
 
-        active = count > 0
-        self._dl_counter.setText(
-            f"Загрузок: {count}" if active else "Нет активных загрузок")
-        self._dl_counter.setProperty("active", "true" if active else "false")
-        self._dl_counter.setStyleSheet(self._dl_counter.styleSheet())
-
-    # ── ГЕОМЕТРИЯ ОКНА ────────────────────────────────────────────────
+    # ── ГЕОМЕТРИЯ ─────────────────────────────────────────────────────
     def _restore_geometry(self):
-        app_cfg = self.config.get("app", {})
-        w = app_cfg.get("window_width",  1280)
-        h = app_cfg.get("window_height", 800)
-        x = app_cfg.get("window_x", -1)
-        y = app_cfg.get("window_y", -1)
-        self.resize(w, h)
-        if x >= 0 and y >= 0:
-            self.move(x, y)
+        try:
+            with open(CONFIG_PATH) as f:
+                cfg = json.load(f)
+            geo = cfg.get("window_geometry")
+            if geo:
+                self.resize(geo.get("width", 1100), geo.get("height", 700))
+                if "x" in geo and "y" in geo:
+                    self.move(geo["x"], geo["y"])
+            else:
+                self.resize(1100, 700)
+        except Exception:
+            self.resize(1100, 700)
 
     def _save_geometry(self):
-        geom = self.geometry()
-        cfg: dict = {}
-        if os.path.exists(CONFIG_PATH):
-            try:
-                with open(CONFIG_PATH, encoding="utf-8") as f:
-                    cfg = json.load(f)
-            except Exception:
-                cfg = {}
-        cfg.setdefault("app", {}).update({
-            "window_width":  geom.width(),
-            "window_height": geom.height(),
-            "window_x":      geom.x(),
-            "window_y":      geom.y(),
-        })
         try:
-            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                json.dump(cfg, f, ensure_ascii=False, indent=2)
+            with open(CONFIG_PATH) as f:
+                cfg = json.load(f)
+        except Exception:
+            cfg = {}
+        g = self.geometry()
+        cfg["window_geometry"] = {
+            "x": g.x(), "y": g.y(),
+            "width": g.width(), "height": g.height(),
+        }
+        try:
+            with open(CONFIG_PATH, "w") as f:
+                json.dump(cfg, f, indent=2, ensure_ascii=False)
         except Exception:
             pass
 
     def closeEvent(self, event: QCloseEvent):
-        self._dl_timer.stop()
         self._save_geometry()
         super().closeEvent(event)
-
-    # ── Публичный метод ───────────────────────────────────────────────
-    def navigate_to(self, page_index: int):
-        """Переключает страницу программно."""
-        self._navigate(page_index)

@@ -1,82 +1,35 @@
 @echo off
-chcp 65001 > nul
-title YT Manager — Установка
-
-echo.
-echo  ╔══════════════════════════════════════╗
-echo  ║      YT Manager — Установка          ║
-echo  ╚══════════════════════════════════════╝
+chcp 65001 >nul
+echo ============================================
+echo  YT Manager — Установка зависимостей
+echo ============================================
 echo.
 
-:: Проверяем Python
-where python > nul 2>&1
+python --version >nul 2>&1
 if %errorlevel% neq 0 (
-    echo  [ОШИБКА] Python не найден в PATH.
-    echo  Скачай Python 3.10+ с https://python.org
-    echo  При установке обязательно включи "Add Python to PATH"
+    echo [ОШИБКА] Python не найден! Установите Python 3.10+
     pause
     exit /b 1
 )
 
-:: Версия Python
-for /f "tokens=2" %%V in ('python --version 2^>^&1') do set PY_VER=%%V
-echo  [OK] Python %PY_VER%
-
-:: Создаём виртуальное окружение
-if not exist ".venv\" (
-    echo  Создаю виртуальное окружение...
-    python -m venv .venv
-    if %errorlevel% neq 0 (
-        echo  [ОШИБКА] Не удалось создать venv.
-        pause
-        exit /b 1
-    )
-    echo  [OK] Окружение .venv создано
-) else (
-    echo  [OK] Окружение .venv уже существует
-)
-
-:: Активируем и устанавливаем зависимости
-echo  Устанавливаю зависимости...
-call .venv\Scripts\activate.bat
-python -m pip install --upgrade pip --quiet
-pip install -r requirements.txt
-if %errorlevel% neq 0 (
-    echo  [ОШИБКА] Ошибка при установке зависимостей.
-    pause
-    exit /b 1
-)
-
-:: Проверяем ffmpeg
-where ffmpeg > nul 2>&1
-if %errorlevel% equ 0 (
-    echo  [OK] ffmpeg найден
-) else (
-    echo.
-    echo  [ПРЕДУПРЕЖДЕНИЕ] ffmpeg не найден.
-    echo  Нарезка и склейка видео будут недоступны.
-    echo  Установи ffmpeg: https://ffmpeg.org/download.html
-    echo  Затем добавь папку bin\ в системный PATH.
-)
-
-:: Проверяем yt-dlp
-where yt-dlp > nul 2>&1
-if %errorlevel% equ 0 (
-    echo  [OK] yt-dlp найден
-) else (
-    :: yt-dlp может быть установлен как Python-модуль
-    python -c "import yt_dlp" > nul 2>&1
-    if %errorlevel% equ 0 (
-        echo  [OK] yt-dlp ^(Python-модуль^)
-    ) else (
-        echo  [OK] yt-dlp установлен как пакет pip
-    )
-)
+echo [1/3] Установка основных зависимостей...
+pip install PyQt6 PyQt6-Qt6 yt-dlp ffmpeg-python Pillow requests python-dateutil
 
 echo.
-echo  ══════════════════════════════════════
+echo [2/3] Установка зависимостей Typewriter Video Generator...
+pip install "numpy>=1.24.0" "moviepy==1.0.3" "edge-tts>=6.1.0"
+
+echo.
+echo [3/3] Установка OpenCV (видео-фон, опционально)...
+pip install opencv-python
+
+echo.
+echo ============================================
 echo  Установка завершена!
-echo  Запусти приложение командой:  run.bat
-echo  ══════════════════════════════════════
+echo  Для запуска: run.bat
 echo.
+echo  [Опционально] XTTS v2 локальный TTS (~2 ГБ):
+echo  pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+echo  pip install coqui-tts
+echo ============================================
 pause

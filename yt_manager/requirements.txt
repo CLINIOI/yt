@@ -14,3 +14,13 @@ Pillow>=10.0.0             # Превью и обработка изображе
 # ─── Utils ────────────────────────────────────────────────────────────
 requests>=2.31.0           # HTTP-запросы (превью, дополнительные API)
 python-dateutil>=2.8.2     # Удобная работа с датами
+
+# ─── Typewriter Video Generator ────────────────────────────────────────
+numpy>=1.24.0              # Массивы для рендера кадров
+moviepy==1.0.3             # Сборка видео из кадров + аудио
+edge-tts>=6.1.0            # Microsoft Edge TTS (онлайн, бесплатно, ~200 голосов)
+opencv-python>=4.8.0       # Видео-фон (опционально)
+
+# ─── XTTS v2 (опционально, ~2 ГБ модель) ─────────────────────────────
+# pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+# pip install coqui-tts
