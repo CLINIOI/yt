@@ -349,155 +349,159 @@ class VideoService:
         quality:        str            = 'fast',
         progress_cb:    Optional[Callable] = None,
     ) -> str:
-        """Стекает видео вертикально через прямой вызов ffmpeg (без ffmpeg-python graph)."""
+        """
+        Композиция видео через overlay (без обрезки и изменения пропорций).
+
+        Логика:
+          1. ФОН (bg_path) масштабируется/обрезается на весь output_width x output_height
+          2. ГЛАВНЫЙ РОЛИК (center_path) накладывается по центру БЕЗ изменения размеров
+          3. БАННЕР (top_path) стыкуется вплотную сверху к главному БЕЗ изменений
+          4. УДЕРЖАНИЕ (bottom_path) стыкуется вплотную снизу к главному БЕЗ изменений
+        """
         import subprocess, threading
 
         os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
 
         center_info = self.get_video_info(center_path)
         duration    = center_info.duration
-        w           = output_width
+        cw          = center_info.width  or output_width
+        ch          = center_info.height or output_height
 
-        # Реальные высоты слотов
-        real_top_h    = top_h    if top_path    and top_h    > 0 else 0
-        real_bottom_h = bottom_h if bottom_path and bottom_h > 0 else 0
-        real_center_h = output_height - real_top_h - real_bottom_h
-        if real_center_h < 100:
-            real_center_h = output_height
-
-        quality_map = {'fast': 'fast', 'good': 'medium', 'best': 'slow'}
-        preset = quality_map.get(quality, 'fast')
+        quality_map = {'fast': 'ultrafast', 'medium': 'fast', 'slow': 'medium', 'good': 'fast', 'best': 'slow'}
+        preset = quality_map.get(quality, 'ultrafast')
 
         def esc(p):
-            """Экранирование пути для ffmpeg filtergraph."""
             return p.replace('\\', '/').replace(':', '\\:').replace("'", "\\'")
 
-        # ── Строим filtergraph ──────────────────────────────────────
-        inputs = []
+        # ── Индексы входов ──────────────────────────────────────────
+        inputs      = []
         filter_parts = []
-        idx = 0  # индекс входного потока
+        idx          = 0
 
-        # Центр (всегда есть)
         inputs += ['-i', center_path]
         center_idx = idx; idx += 1
 
-        # Верх
-        if top_path and real_top_h > 0:
+        has_top = bool(top_path and os.path.isfile(top_path))
+        has_bot = bool(bottom_path and os.path.isfile(bottom_path))
+        has_bg  = bool(bg_path and os.path.isfile(bg_path))
+
+        if has_top:
             inputs += ['-stream_loop', '-1', '-t', str(duration), '-i', top_path]
             top_idx = idx; idx += 1
         else:
             top_idx = None
 
-        # Низ
-        if bottom_path and real_bottom_h > 0:
+        if has_bot:
             inputs += ['-stream_loop', '-1', '-t', str(duration), '-i', bottom_path]
             bot_idx = idx; idx += 1
         else:
             bot_idx = None
 
-        # Фон
-        if bg_path and os.path.isfile(bg_path):
+        if has_bg:
             inputs += ['-stream_loop', '-1', '-t', str(duration), '-i', bg_path]
             bg_idx = idx; idx += 1
         else:
             bg_idx = None
 
-        # ── Фильтры для каждого слоя ───────────────────────────────
-        # scale+crop = заполнить слот без отступов
-        # ── Вычисляем реальную высоту центра по пропорциям исходника ──
-        cw = center_info.width  if hasattr(center_info, 'width')  else output_width
-        ch = center_info.height if hasattr(center_info, 'height') else output_height
-        if cw and ch and cw > 0:
-            # Масштабируем до output_width, сохраняем пропорции
-            scaled_center_h = int(round(ch * output_width / cw))
-            # Высота должна быть чётной (требование H.264)
-            if scaled_center_h % 2 != 0:
-                scaled_center_h += 1
+        # ── Получаем реальные размеры top/bottom БЕЗ изменений ─────
+        # Размеры top и bottom берём из самих файлов (не трогаем)
+        top_w, top_h_real = 0, 0
+        bot_w, bot_h_real = 0, 0
+        if has_top:
+            try:
+                ti = self.get_video_info(top_path)
+                top_w, top_h_real = ti.width or 0, ti.height or 0
+            except Exception:
+                pass
+        if has_bot:
+            try:
+                bi = self.get_video_info(bottom_path)
+                bot_w, bot_h_real = bi.width or 0, bi.height or 0
+            except Exception:
+                pass
+
+        # ── Масштабируем главное видео: ширина = output_width, высота по пропорциям ──
+        # Боковых полос нет — видео от края до края по ширине
+        if cw > 0 and ch > 0:
+            scale  = output_width / cw
+            new_cw = output_width
+            new_ch = int(ch * scale)
+            if new_ch % 2 != 0: new_ch -= 1
         else:
-            scaled_center_h = real_center_h
+            new_cw, new_ch = output_width, output_height
 
-        # top/bottom прижимаются вплотную, итого output_height пересчитывается
-        total_h = real_top_h + scaled_center_h + real_bottom_h
+        # ── Вычисляем позиции overlay ───────────────────────────────
+        # Весь стек центрируем вертикально на фоне
+        total_stack_h = top_h_real + new_ch + bot_h_real
+        stack_top_y   = max(0, (output_height - total_stack_h) // 2)
 
-        def sc_crop(stream_label, out_label, tw, th):
-            """Заполняет слот crop-ом — для баннера и нижнего видео."""
-            return (f"[{stream_label}]scale={tw}:{th}:force_original_aspect_ratio=increase,"
-                    f"crop={tw}:{th},setsar=1[{out_label}]")
+        center_x = max(0, (output_width - new_cw) // 2)
+        center_y = stack_top_y + top_h_real
 
-        def sc_exact(stream_label, out_label, tw):
-            """Масштабирует до точной ширины, сохраняя пропорции — для центра."""
-            return (f"[{stream_label}]scale={tw}:-2,setsar=1[{out_label}]")
+        # Баннер: прямо над главным, центрируем по горизонтали
+        top_x = max(0, (output_width - top_w) // 2) if top_w else 0
+        top_y = center_y - top_h_real
 
-        def solid_src(out_label, tw, th):
-            """Однотонная заглушка для пустого слота."""
-            return f"color=c={bg_color}:size={tw}x{th}:rate=30:d={duration}[{out_label}]"
+        # Удержание: прямо под главным, центрируем по горизонтали
+        bot_x = max(0, (output_width - bot_w) // 2) if bot_w else 0
+        bot_y = center_y + new_ch
 
-        parts = []
-
-        # ── TOP (баннер) — crop заполняет слот полностью ──
-        if top_idx is not None and real_top_h > 0:
-            filter_parts.append(sc_crop(f'{top_idx}:v', 'top', output_width, real_top_h))
-            parts.append('[top]')
-        elif real_top_h > 0:
-            filter_parts.append(solid_src('top', output_width, real_top_h))
-            parts.append('[top]')
-
-        # ── CENTER — scale по ширине, пропорции сохранены, без pad ──
-        if subtitle_path and os.path.isfile(subtitle_path):
-            sub_esc_path = esc(subtitle_path)
+        # ── Строим filtergraph ──────────────────────────────────────
+        # Шаг 1: Фон на весь экран (scale+crop — только фон обрезается)
+        if has_bg:
             filter_parts.append(
-                f"[{center_idx}:v]scale={output_width}:-2,setsar=1,"
-                f"subtitles='{sub_esc_path}':force_style='Fontsize={subtitle_size},"
-                f"PrimaryColour=&H00ffffff,OutlineColour=&H00000000,Outline=2,Shadow=1'[ctr]"
+                f"[{bg_idx}:v]scale={output_width}:{output_height}:"
+                f"force_original_aspect_ratio=increase,"
+                f"crop={output_width}:{output_height},setsar=1[bg]"
             )
+            base_label = 'bg'
         else:
-            filter_parts.append(sc_exact(f'{center_idx}:v', 'ctr', output_width))
-        parts.append('[ctr]')
+            filter_parts.append(
+                f"color=c={bg_color}:size={output_width}x{output_height}:"
+                f"rate=30:d={duration}[bg]"
+            )
+            base_label = 'bg'
 
-        # ── BOTTOM — crop заполняет слот полностью ──
-        if bot_idx is not None and real_bottom_h > 0:
-            filter_parts.append(sc_crop(f'{bot_idx}:v', 'bot', output_width, real_bottom_h))
-            parts.append('[bot]')
-        elif real_bottom_h > 0:
-            filter_parts.append(solid_src('bot', output_width, real_bottom_h))
-            parts.append('[bot]')
+        # Шаг 2: Главное видео — масштабируем чтобы вписалось, накладываем по центру
+        filter_parts.append(
+            f"[{center_idx}:v]scale={new_cw}:{new_ch},setsar=1[ctr]"
+        )
+        filter_parts.append(
+            f"[{base_label}][ctr]overlay={center_x}:{center_y}[v1]"
+        )
+        cur_label = 'v1'
 
-        # ── Стекуем вертикально ──
-        if real_top_h > 0:
-            stack_inputs = '[top][ctr]' + ('[bot]' if real_bottom_h > 0 else '')
-        else:
-            stack_inputs = '[ctr]' + ('[bot]' if real_bottom_h > 0 else '')
+        # Шаг 3: Баннер — без изменений, overlay прямо над главным
+        if has_top and top_h_real > 0:
+            filter_parts.append(f"[{top_idx}:v]setsar=1[top_v]")
+            filter_parts.append(
+                f"[{cur_label}][top_v]overlay={top_x}:{max(0,top_y)}[v2]"
+            )
+            cur_label = 'v2'
 
-        n_stack = len(parts)
-        if n_stack > 1:
-            filter_parts.append(f"{stack_inputs}vstack=inputs={n_stack}[stacked]")
-            final_v = '[stacked]'
-        else:
-            filter_parts.append(f"{stack_inputs}null[stacked]")
-            final_v = '[stacked]'
+        # Шаг 4: Удержание — без изменений, overlay прямо под главным
+        if has_bot and bot_h_real > 0:
+            filter_parts.append(f"[{bot_idx}:v]setsar=1[bot_v]")
+            filter_parts.append(
+                f"[{cur_label}][bot_v]overlay={bot_x}:{bot_y}[v3]"
+            )
+            cur_label = 'v3'
 
-        # ── Фоновое видео (overlay под стеком) ──
-        if bg_idx is not None:
-            bg_out_h = total_h
-            filter_parts.append(sc_crop(f'{bg_idx}:v', 'bg', output_width, bg_out_h))
-            filter_parts.append(f"[bg][stacked]overlay=0:0[out]")
-            final_v = '[out]'
-
+        final_v = f'[{cur_label}]'
         filtergraph = ';'.join(filter_parts)
 
         # ── Аудио источник ─────────────────────────────────────────
-        audio_idx_map = {
+        audio_map = {
             'center': center_idx,
             'top':    top_idx,
             'bottom': bot_idx,
         }
-        aidx = audio_idx_map.get(audio_source, center_idx) or center_idx
+        aidx = audio_map.get(audio_source, center_idx) or center_idx
 
-        # ── Автовыбор кодировщика (GPU > CPU) ────────────────────
+        # ── Автовыбор кодировщика ──────────────────────────────────
         def _detect_encoder():
-            """Проверяет доступные аппаратные кодировщики."""
-            import subprocess as _sp
             try:
+                import subprocess as _sp
                 r = _sp.run(['ffmpeg', '-encoders'], capture_output=True, text=True, timeout=8)
                 enc_list = r.stdout + r.stderr
                 if 'h264_nvenc' in enc_list:
@@ -509,46 +513,18 @@ class VideoService:
             return 'cpu'
 
         hw = _detect_encoder()
-
-        if hw == 'nvenc':
-            # NVIDIA GPU — в 5-10x быстрее CPU
-            vcodec_args = [
-                '-vcodec', 'h264_nvenc',
-                '-preset', 'p4',          # balanced: быстро + качество
-                '-rc', 'vbr',
-                '-cq', '26',
-                '-b:v', '0',
-                '-spatial_aq', '1',
-            ]
-            # hwaccel для декодирования
-            hw_decode = ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda']
-        elif hw == 'qsv':
-            # Intel QuickSync — быстро на встроенной графике
-            vcodec_args = [
-                '-vcodec', 'h264_qsv',
-                '-global_quality', '26',
-                '-preset', 'faster',
-            ]
-            hw_decode = ['-hwaccel', 'qsv']
-        else:
-            # CPU fallback — ultrafast пресет
-            vcodec_args = [
-                '-vcodec', 'libx264',
-                '-preset', 'ultrafast',
-                '-crf', '26',
-                '-threads', '0',          # все ядра
-            ]
-            hw_decode = []
-
         log.debug('stack_videos encoder: %s', hw)
 
-        # ── Финальная команда ──────────────────────────────────────
-        # hw_decode применяем только к первому входу (center)
-        # Для сложного filtergraph hwaccel_output_format=cuda может не работать с фильтрами
-        # поэтому для NVENC пробуем без hw decode если фильтров много
-        use_hw_decode = hw_decode if (hw == 'cpu' or len(filter_parts) <= 3) else []
+        if hw == 'nvenc':
+            vcodec_args = ['-vcodec', 'h264_nvenc', '-preset', 'p4',
+                           '-rc', 'vbr', '-cq', '26', '-b:v', '0', '-spatial_aq', '1']
+        elif hw == 'qsv':
+            vcodec_args = ['-vcodec', 'h264_qsv', '-global_quality', '26', '-preset', 'faster']
+        else:
+            vcodec_args = ['-vcodec', 'libx264', '-preset', preset, '-crf', '26', '-threads', '0']
 
-        cmd = ['ffmpeg', '-y'] + use_hw_decode + inputs + [
+        # ── Финальная команда ──────────────────────────────────────
+        cmd = ['ffmpeg', '-y'] + inputs + [
             '-filter_complex', filtergraph,
             '-map', final_v,
             '-map', f'{aidx}:a',
@@ -566,11 +542,7 @@ class VideoService:
         if progress_cb:
             progress_cb(5, 'Запуск рендеринга...')
 
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
         stderr_lines = []
         def _drain():
@@ -579,6 +551,7 @@ class VideoService:
                 if line: stderr_lines.append(line)
             process.stderr.close()
 
+        import threading
         t = threading.Thread(target=_drain, daemon=True)
         t.start()
 
@@ -586,17 +559,16 @@ class VideoService:
             line = raw.decode('utf-8', errors='ignore').strip()
             if line.startswith('out_time_ms='):
                 try:
-                    ms = int(line.split('=')[1])
-                    if ms > 0 and duration > 0:
-                        pct = min(99, int(ms / (duration * 1_000_000) * 100))
-                        if progress_cb:
-                            progress_cb(pct, f'Рендеринг {pct}%...')
-                except (ValueError, ZeroDivisionError):
+                    ms  = int(line.split('=')[1])
+                    pct = min(99, int(ms / 1000 / duration * 95) + 5)
+                    if progress_cb:
+                        progress_cb(pct, f'Рендеринг... {pct}%')
+                except Exception:
                     pass
 
         process.stdout.close()
-        t.join(timeout=30)
         process.wait()
+        t.join(timeout=5)
 
         if process.returncode not in (0, None):
             err = '\n'.join(stderr_lines[-10:])
@@ -605,8 +577,6 @@ class VideoService:
         if progress_cb:
             progress_cb(100, 'Готово!')
         return output_path
-
-        # ── Вырезка сегмента ──────────────────────────────────────────────
 
     def trim_video(
         self,

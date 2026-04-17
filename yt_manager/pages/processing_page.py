@@ -1,14 +1,10 @@
-# processing_page.py — Страница обработки видео (полный редизайн)
+# processing_page.py — Страница обработки видео (редизайн v2)
 #
-# Архитектура:
-#   SourcePanel      — выбор источника видео (файл / папка / канал)
-#   CutPanel         — настройки нарезки
-#   CompositionPanel — слоты верх/центр/низ + фон
-#   SubtitlePanel    — субтитры
-#   FormatPanel      — формат вывода / пропорции
-#   OutputPanel      — имя файла / папка вывода
-#   TaskCard         — карточка активной задачи
-#   ProcessingPage   — главная страница
+# Два сегмента:
+#   Сегмент 1 — НАРЕЗКА: выбор источника + параметры нарезки
+#   Сегмент 2 — КОМПОЗИЦИЯ: главный ролик + баннер + удержание + фон + нарезка результата
+#
+# Настройки очистки: удалять скачанное / удалять после композиции
 
 import os
 import re
@@ -18,9 +14,8 @@ from PyQt6.QtWidgets import (
     QWidget, QFrame, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QLineEdit, QSpinBox, QCheckBox,
     QComboBox, QListWidget, QListWidgetItem, QScrollArea,
-    QFileDialog, QAbstractItemView, QSizePolicy, QProgressBar,
-    QSplitter, QButtonGroup, QStackedWidget, QTabBar,
-    QGroupBox, QRadioButton, QSlider,
+    QFileDialog, QSizePolicy, QProgressBar,
+    QButtonGroup, QRadioButton, QGroupBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QSize
 from PyQt6.QtGui import QFont
@@ -30,79 +25,76 @@ from db import db
 from video_service import VideoService, ProcessWorker, is_ffmpeg_available
 
 VIDEO_EXTS = {'.mp4', '.mkv', '.avi', '.mov', '.webm', '.m4v', '.ts', '.flv'}
-
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-FORMAT_PRESETS = {
-    'original': {'label': 'Оригинал',  'w': 0,    'h': 0,    'top': 0,   'center': 0,    'bottom': 0,   'ratio': 'исходный'},
-    'tiktok':   {'label': 'TikTok',    'w': 1080,  'h': 1920, 'top': 320, 'center': 1280, 'bottom': 320, 'ratio': '9:16'},
-    'reels':    {'label': 'Reels',     'w': 1080,  'h': 1920, 'top': 240, 'center': 1440, 'bottom': 240, 'ratio': '9:16'},
-    'shorts':   {'label': 'Shorts',    'w': 1080,  'h': 1920, 'top': 0,   'center': 1920, 'bottom': 0,   'ratio': '9:16'},
-    'square':   {'label': 'Квадрат',   'w': 1080,  'h': 1080, 'top': 200, 'center': 680,  'bottom': 200, 'ratio': '1:1'},
-    'youtube':  {'label': 'YouTube',   'w': 1920,  'h': 1080, 'top': 0,   'center': 1080, 'bottom': 0,   'ratio': '16:9'},
-}
-
-QUALITY_MAP = {'Быстро':   'fast', 'Хорошо': 'medium', 'Лучшее': 'slow'}
-BG_COLOR_MAP = {'Чёрный': 'black', 'Белый': 'white', 'Серый': 'gray'}
-SUB_COLOR_MAP = {'Белый': 'white', 'Жёлтый': 'yellow', 'Чёрный': 'black'}
 
 # ──────────────────────────────────────────────────────────────────────
 # QSS
 # ──────────────────────────────────────────────────────────────────────
 
 PAGE_QSS = """
-/* ── Фон страницы ── */
 QWidget#proc_page { background: #171614; }
 
-/* ── Заголовок ── */
-QFrame#proc_header { background: #1c1b19; border-bottom: 1px solid #2d2c2a; }
-QLabel#page_title  { color: #cdccca; font-size: 15px; font-weight: 700; }
-QLabel#page_sub    { color: #5a5957; font-size: 11px; }
-
-/* ── Секции (группы) ── */
-QFrame#section_card {
+/* Заголовок сегмента */
+QFrame#seg_header {
     background: #1c1b19;
     border: 1px solid #2d2c2a;
+    border-radius: 10px 10px 0 0;
+    border-bottom: none;
+}
+QLabel#seg_num {
+    background: #4f98a3; color: #171614;
+    font-size: 11px; font-weight: 800;
     border-radius: 10px;
+    min-width: 20px; min-height: 20px;
+    max-width: 20px; max-height: 20px;
+    qproperty-alignment: AlignCenter;
 }
-QLabel#section_title {
-    color: #cdccca; font-size: 12px; font-weight: 700;
-}
-QLabel#section_hint {
-    color: #5a5957; font-size: 10px;
+QLabel#seg_title { color: #cdccca; font-size: 14px; font-weight: 700; }
+QLabel#seg_sub   { color: #5a5957; font-size: 11px; }
+
+/* Тело сегмента */
+QFrame#seg_body {
+    background: #1c1b19;
+    border: 1px solid #2d2c2a;
+    border-radius: 0 0 10px 10px;
 }
 
-/* ── Разделители ── */
-QFrame#hdiv { background: #2d2c2a; max-height: 1px; }
+/* Внутренняя карточка */
+QFrame#inner_card {
+    background: #201f1d;
+    border: 1px solid #2d2c2a;
+    border-radius: 8px;
+}
+QLabel#card_title {
+    color: #797876; font-size: 10px;
+    font-weight: 700; letter-spacing: 1px;
+}
 
-/* ── Кнопки источника (радио-стиль) ── */
-QPushButton#src_btn {
+/* Переключатели режима источника */
+QPushButton#mode_btn {
     background: #201f1d; color: #797876;
     border: 1px solid #2d2c2a; border-radius: 7px;
     font-size: 11px; font-weight: 600;
-    padding: 7px 14px; text-align: left;
+    padding: 8px 14px;
 }
-QPushButton#src_btn:hover   { border-color: #4f98a3; color: #cdccca; }
-QPushButton#src_btn:checked {
+QPushButton#mode_btn:hover   { border-color: #4f98a3; color: #cdccca; }
+QPushButton#mode_btn:checked {
     background: #1a3535; color: #4f98a3;
     border-color: #4f98a3; font-weight: 700;
 }
 
-/* ── Слот видео ── */
-QFrame#slot_frame {
+/* Слот видео */
+QFrame#slot_card {
     background: #201f1d; border: 1px solid #2d2c2a;
     border-radius: 8px;
 }
-QFrame#slot_frame[required="true"]  { border-color: #313b3b; }
-QFrame#slot_frame[filled="true"]    { border-color: #01696f; }
-QLabel#slot_title   { color: #797876; font-size: 10px; font-weight: 700; letter-spacing: 0.8px; }
-QLabel#slot_badge   { color: #4f98a3; font-size: 9px; font-weight: 700; background: #1a3535; border-radius: 3px; padding: 1px 5px; }
-QLabel#slot_badge_req { color: #bb653b; font-size: 9px; font-weight: 700; background: #2a1a10; border-radius: 3px; padding: 1px 5px; }
-QLabel#slot_path    { color: #4f98a3; font-size: 11px; }
-QLabel#slot_empty   { color: #3a3937; font-size: 11px; font-style: italic; }
-QLabel#slot_info    { color: #5a5957; font-size: 10px; }
-
-/* ── Кнопки слота ── */
+QFrame#slot_card[filled="true"]    { border-color: #01696f; }
+QFrame#slot_card[required="true"]  { border-left: 3px solid #4f98a3; }
+QLabel#slot_title  { color: #797876; font-size: 10px; font-weight: 700; letter-spacing: 0.8px; }
+QLabel#slot_path   { color: #4f98a3; font-size: 11px; }
+QLabel#slot_empty  { color: #3a3937; font-size: 11px; font-style: italic; }
+QLabel#slot_info   { color: #5a5957; font-size: 10px; }
 QPushButton#slot_pick {
     background: #28251d; border: 1px solid #393836;
     border-radius: 5px; color: #cdccca; font-size: 11px; padding: 4px 10px;
@@ -114,7 +106,16 @@ QPushButton#slot_clear {
 }
 QPushButton#slot_clear:hover { color: #dd6974; background: #2a1a1a; }
 
-/* ── Поля ввода ── */
+/* Список файлов (для папки/проект) */
+QListWidget#file_list {
+    background: #201f1d; border: 1px solid #2d2c2a;
+    border-radius: 6px; color: #cdccca; font-size: 11px; outline: none;
+}
+QListWidget#file_list::item { padding: 5px 10px; border-radius: 4px; }
+QListWidget#file_list::item:selected { background: #313b3b; color: #4f98a3; }
+QListWidget#file_list::item:hover:!selected { background: #262523; }
+
+/* Поля */
 QLineEdit#field {
     background: #201f1d; border: 1px solid #393836;
     border-radius: 6px; color: #cdccca; font-size: 12px; padding: 6px 10px;
@@ -156,22 +157,14 @@ QRadioButton#radio::indicator {
 }
 QRadioButton#radio::indicator:checked { background: #4f98a3; border-color: #4f98a3; }
 
-/* ── Формат кнопки ── */
-QPushButton#fmt_btn {
-    background: #201f1d; border: 1px solid #2d2c2a;
-    border-radius: 7px; color: #797876; font-size: 10px; font-weight: 600;
-    padding: 0; min-width: 72px; min-height: 48px;
-}
-QPushButton#fmt_btn:hover { border-color: #5a5957; color: #cdccca; }
-QPushButton#fmt_btn:checked {
-    background: #1a3535; border: 2px solid #4f98a3; color: #4f98a3; font-weight: 700;
-}
+/* Разделитель */
+QFrame#hdiv { background: #2d2c2a; max-height: 1px; border: none; }
 
-/* ── Кнопки действий ── */
+/* Кнопки действий */
 QPushButton#btn_start {
     background: #01696f; color: #f9f8f5; border: none;
     border-radius: 8px; font-size: 13px; font-weight: 700;
-    padding: 11px 0; min-height: 42px;
+    padding: 12px 0; min-height: 44px;
 }
 QPushButton#btn_start:hover    { background: #0c4e54; }
 QPushButton#btn_start:disabled { background: #2d2c2a; color: #5a5957; }
@@ -182,24 +175,7 @@ QPushButton#btn_secondary {
 }
 QPushButton#btn_secondary:hover { background: #2d2c2a; border-color: #5a5957; }
 
-QPushButton#icon_btn {
-    background: #28251d; color: #797876; border: 1px solid #2d2c2a;
-    border-radius: 5px; font-size: 13px; padding: 3px 8px;
-    min-width: 28px; min-height: 28px;
-}
-QPushButton#icon_btn:hover { background: #2d2c2a; color: #cdccca; }
-QPushButton#icon_btn:disabled { color: #3a3937; }
-
-/* ── Список видео каналов ── */
-QListWidget#ch_list {
-    background: #201f1d; border: 1px solid #2d2c2a;
-    border-radius: 6px; color: #cdccca; font-size: 11px; outline: none;
-}
-QListWidget#ch_list::item { padding: 5px 10px; border-radius: 4px; }
-QListWidget#ch_list::item:selected { background: #313b3b; color: #4f98a3; }
-QListWidget#ch_list::item:hover:!selected { background: #262523; }
-
-/* ── Карточка задачи ── */
+/* Карточка задачи */
 QFrame#task_card {
     background: #201f1d; border: 1px solid #2d2c2a; border-radius: 10px;
 }
@@ -211,116 +187,259 @@ QPushButton#task_cancel {
     font-size: 14px; border-radius: 4px; padding: 2px 6px;
 }
 QPushButton#task_cancel:hover { color: #dd6974; background: #2a1a1a; }
-QPushButton#btn_del {
-    background: #2d2c2a; color: #dd6974; border: 1px solid #3a3836;
-    border-radius: 5px; padding: 3px 12px; font-size: 11px;
-}
-QPushButton#btn_del:hover { background: #3a2828; border-color: #dd6974; }
-QPushButton#btn_del_warn {
-    background: #2d2c2a; color: #fdab43; border: 1px solid #3a3836;
-    border-radius: 5px; padding: 3px 12px; font-size: 11px;
-}
-QPushButton#btn_del_warn:hover { background: #2e2820; border-color: #fdab43; }
-QPushButton#btn_del_done {
-    background: transparent; color: #5a5957; border: none;
-    font-size: 11px; padding: 3px 12px;
-}
 QProgressBar#task_bar {
     background: #2d2c2a; border: none; border-radius: 3px;
     max-height: 4px; min-height: 4px;
 }
 QProgressBar#task_bar::chunk { background: #4f98a3; border-radius: 3px; }
 
-/* ── Правая панель задач ── */
+/* Правая панель задач */
 QFrame#tasks_panel { background: #171614; border-left: 1px solid #2d2c2a; }
 QLabel#tasks_title { color: #5a5957; font-size: 10px; font-weight: 700; letter-spacing: 0.8px; }
 QLabel#no_tasks { color: #2d2c2a; font-size: 13px; }
 
-/* ── Scroll ── */
+/* Настройки очистки */
+QFrame#cleanup_card {
+    background: #1c1b19; border: 1px solid #2d2c2a;
+    border-radius: 8px; border-left: 3px solid #bb653b;
+}
+QLabel#cleanup_title { color: #bb653b; font-size: 11px; font-weight: 700; }
+
+/* Scroll */
 QScrollArea { border: none; background: transparent; }
 QScrollBar:vertical { background: transparent; width: 5px; }
 QScrollBar::handle:vertical { background: #2d2c2a; border-radius: 2px; min-height: 20px; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 
-/* ── Misc ── */
-QLabel#lbl { color: #797876; font-size: 12px; }
-QLabel#hint { color: #5a5957; font-size: 10px; }
-QLabel#err  { color: #dd6974; font-size: 11px; }
+/* Misc */
+QLabel#lbl      { color: #797876; font-size: 12px; }
+QLabel#hint     { color: #3a3937; font-size: 10px; font-style: italic; }
+QLabel#badge_req { color: #bb653b; font-size: 9px; font-weight: 700;
+                   background: #2a1a10; border-radius: 3px; padding: 1px 5px; }
+QLabel#badge_opt { color: #5a5957; font-size: 9px; font-weight: 700;
+                   background: #22211f; border-radius: 3px; padding: 1px 5px; }
 """
+
 
 # ──────────────────────────────────────────────────────────────────────
 # УТИЛИТЫ
 # ──────────────────────────────────────────────────────────────────────
 
-def _lbl(text, obj='lbl', wrap=False):
-    l = QLabel(text)
-    l.setObjectName(obj)
-    if wrap:
-        l.setWordWrap(True)
+def _hdiv():
+    f = QFrame(); f.setObjectName('hdiv')
+    f.setFrameShape(QFrame.Shape.HLine)
+    return f
+
+def _lbl(text, obj='lbl'):
+    l = QLabel(text); l.setObjectName(obj)
     return l
 
-def _hdiv():
-    f = QFrame(); f.setObjectName('hdiv'); f.setFixedHeight(1); return f
-
-def _spin(lo, hi, val, suffix=''):
+def _spin(mn, mx, val, suffix=''):
     s = QSpinBox(); s.setObjectName('spin')
-    s.setRange(lo, hi); s.setValue(val)
+    s.setRange(mn, mx); s.setValue(val)
     if suffix: s.setSuffix(suffix)
     return s
 
 def _combo(items):
     c = QComboBox(); c.setObjectName('combo')
-    c.addItems(items); return c
+    for i in items: c.addItem(i)
+    return c
 
-def _section_card(title, hint=''):
-    card = QFrame(); card.setObjectName('section_card')
-    lay = QVBoxLayout(card); lay.setContentsMargins(14, 12, 14, 14); lay.setSpacing(10)
-    hdr = QHBoxLayout(); hdr.setSpacing(8)
-    t = QLabel(title.upper()); t.setObjectName('section_title')
-    hdr.addWidget(t); hdr.addStretch()
-    if hint:
-        h = QLabel(hint); h.setObjectName('section_hint'); hdr.addWidget(h)
-    lay.addLayout(hdr)
-    lay.addWidget(_hdiv())
-    return card, lay
+def _sanitize(name: str) -> str:
+    return re.sub(r'[/:*?<>|\\]', '_', name).strip()[:80]
 
-def _pick_random_video(folder):
+def _pick_random_video(folder: str) -> Optional[str]:
     import random
     files = [os.path.join(folder, f) for f in os.listdir(folder)
              if os.path.splitext(f)[1].lower() in VIDEO_EXTS]
     return random.choice(files) if files else None
 
-def _sanitize(name):
-    return re.sub(r'[/:*?"<>|\\]', '_', name).strip()[:120]
+def _scan_project_folders() -> dict:
+    """Возвращает {папка_название: [список файлов]} из downloads/ и processed/."""
+    result = {}
+    for base in ['downloads', 'processed', 'clips']:
+        base_path = os.path.join(BASE_DIR, base)
+        if not os.path.isdir(base_path):
+            continue
+        for sub in os.listdir(base_path):
+            sub_path = os.path.join(base_path, sub)
+            if os.path.isdir(sub_path):
+                files = [os.path.join(sub_path, f) for f in os.listdir(sub_path)
+                         if os.path.splitext(f)[1].lower() in VIDEO_EXTS]
+                if files:
+                    result[f'{base}/{sub}'] = files
+        # Видео прямо в корне папки
+        root_files = [os.path.join(base_path, f) for f in os.listdir(base_path)
+                      if os.path.splitext(f)[1].lower() in VIDEO_EXTS]
+        if root_files:
+            result[base] = root_files
+    return result
+
 
 # ──────────────────────────────────────────────────────────────────────
-# ВИДЖЕТ: ВЫБОР ВИДЕО (слот)
+# ДИАЛОГ: ВЫБОР ВИДЕО ИЗ ПАПОК ПРОЕКТА
+# ──────────────────────────────────────────────────────────────────────
+
+class ProjectVideoPicker:
+    def __new__(cls, parent=None):
+        from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
+                                      QComboBox, QListWidget, QListWidgetItem,
+                                      QDialogButtonBox, QLabel, QSplitter)
+        dlg = QDialog(parent)
+        dlg.setWindowTitle('Выбрать видео из проекта')
+        dlg.setMinimumSize(560, 420)
+        dlg.setStyleSheet(PAGE_QSS + "QDialog{background:#1c1b19;}")
+
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(10)
+
+        lay.addWidget(_lbl('Папка проекта:'))
+        folder_combo = QComboBox(); folder_combo.setObjectName('combo')
+
+        folders = _scan_project_folders()
+        for folder_name, files in folders.items():
+            folder_combo.addItem(f'📁  {folder_name}  ({len(files)} файлов)', files)
+
+        if folder_combo.count() == 0:
+            folder_combo.addItem('— нет видео в папках проекта —', [])
+
+        lay.addWidget(folder_combo)
+
+        vlist = QListWidget(); vlist.setObjectName('file_list')
+        lay.addWidget(vlist)
+
+        hint = _lbl('Двойной клик или ОК для выбора', 'hint')
+        lay.addWidget(hint)
+
+        dlg._selected = ''
+
+        def _load(idx):
+            vlist.clear()
+            files = folder_combo.itemData(idx) or []
+            for fp in files:
+                item = QListWidgetItem(f'🎬  {os.path.basename(fp)}')
+                item.setData(Qt.ItemDataRole.UserRole, fp)
+                item.setToolTip(fp)
+                vlist.addItem(item)
+
+        folder_combo.currentIndexChanged.connect(_load)
+        if folder_combo.count() > 0:
+            _load(0)
+
+        def _accept():
+            sel = vlist.selectedItems()
+            if sel:
+                dlg._selected = sel[0].data(Qt.ItemDataRole.UserRole)
+            dlg.accept()
+
+        vlist.itemDoubleClicked.connect(lambda _: _accept())
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(_accept)
+        btns.rejected.connect(dlg.reject)
+        lay.addWidget(btns)
+
+        dlg.selected_path = lambda: dlg._selected
+        return dlg
+
+
+# ──────────────────────────────────────────────────────────────────────
+# ДИАЛОГ: ВЫБОР ИЗ СКАЧАННЫХ КАНАЛОВ
+# ──────────────────────────────────────────────────────────────────────
+
+class ChannelVideoPicker:
+    def __new__(cls, parent=None):
+        from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QComboBox,
+                                      QListWidget, QListWidgetItem,
+                                      QDialogButtonBox)
+        dlg = QDialog(parent)
+        dlg.setWindowTitle('Выбрать видео из канала')
+        dlg.setMinimumSize(520, 400)
+        dlg.setStyleSheet(PAGE_QSS + "QDialog{background:#1c1b19;}")
+
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(10)
+
+        lay.addWidget(_lbl('Канал:'))
+        ch_combo = QComboBox(); ch_combo.setObjectName('combo')
+        channels = []
+        try:
+            channels = db.get_all_channels()
+        except Exception:
+            pass
+        for ch in channels:
+            ch_combo.addItem(ch.get('title') or ch.get('url', '?'), ch['id'])
+        if ch_combo.count() == 0:
+            ch_combo.addItem('— нет каналов —', None)
+        lay.addWidget(ch_combo)
+
+        vlist = QListWidget(); vlist.setObjectName('file_list')
+        lay.addWidget(vlist)
+
+        dlg._selected = ''
+
+        def _load(idx):
+            vlist.clear()
+            ch_id = ch_combo.itemData(idx)
+            if ch_id is None:
+                return
+            try:
+                videos = db.get_videos_by_channel(ch_id, status='downloaded')
+                for v in videos:
+                    fp = v.get('file_path', '')
+                    if fp and os.path.isfile(fp):
+                        item = QListWidgetItem(f'🎬  {v.get("title", os.path.basename(fp))}')
+                        item.setData(Qt.ItemDataRole.UserRole, fp)
+                        item.setToolTip(fp)
+                        vlist.addItem(item)
+            except Exception:
+                pass
+
+        ch_combo.currentIndexChanged.connect(_load)
+        if ch_combo.count() > 0:
+            _load(0)
+
+        def _accept():
+            sel = vlist.selectedItems()
+            if sel:
+                dlg._selected = sel[0].data(Qt.ItemDataRole.UserRole)
+            dlg.accept()
+
+        vlist.itemDoubleClicked.connect(lambda _: _accept())
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(_accept)
+        btns.rejected.connect(dlg.reject)
+        lay.addWidget(btns)
+
+        dlg.selected_path = lambda: dlg._selected
+        return dlg
+
+
+# ──────────────────────────────────────────────────────────────────────
+# ВИДЖЕТ СЛОТА ВИДЕО (один ролик с кнопками выбора)
 # ──────────────────────────────────────────────────────────────────────
 
 class VideoSlot(QFrame):
-    """
-    Слот для одного видео: отображает путь, разрешение, кнопки выбора.
-    Режимы выбора: файл, папка (случайный файл), видео из канала.
-    """
+    """Слот для одного видеофайла с тремя способами выбора."""
     changed = pyqtSignal()
 
-    SLOT_CONFIGS = {
-        'center': {'icon': '🎬', 'title': 'ЦЕНТР  —  Главное видео',     'req': True},
-        'top':    {'icon': '📢', 'title': 'ВЕРХ  —  Рекламный баннер',    'req': False},
-        'bottom': {'icon': '🎮', 'title': 'НИЗ  —  Удержание внимания',   'req': False},
-        'bg':     {'icon': '🖼', 'title': 'ФОН  —  Зацикленное видео',    'req': False},
-    }
-
-    def __init__(self, slot_key='center', parent=None):
+    def __init__(self, title='ВИДЕО', icon='🎬', required=False, parent=None):
         super().__init__(parent)
-        self.setObjectName('slot_frame')
-        cfg = self.SLOT_CONFIGS.get(slot_key, {'icon': '📄', 'title': slot_key, 'req': False})
-        self._req = cfg['req']
-        self._icon = cfg['icon']
-        self._title_text = cfg['title']
+        self.setObjectName('slot_card')
+        self._title_text = title
+        self._icon = icon
+        self._required = required
         self._path = ''
         self._is_folder = False
-        self.setProperty('required', 'true' if self._req else 'false')
+        self.setProperty('required', 'true' if required else 'false')
+        self.setProperty('filled', 'false')
         self._build()
 
     def _build(self):
@@ -328,38 +447,44 @@ class VideoSlot(QFrame):
         lay.setContentsMargins(12, 10, 12, 10)
         lay.setSpacing(6)
 
-        # Заголовок
+        # Заголовок строки
         hdr = QHBoxLayout(); hdr.setSpacing(6)
-        icon_lbl = QLabel(self._icon); icon_lbl.setStyleSheet('font-size:14px;')
+        icon_lbl = QLabel(self._icon)
+        icon_lbl.setStyleSheet('font-size:14px;')
         hdr.addWidget(icon_lbl)
-        t = QLabel(self._title_text); t.setObjectName('slot_title'); hdr.addWidget(t)
+        t = QLabel(self._title_text); t.setObjectName('slot_title')
+        hdr.addWidget(t)
         hdr.addStretch()
-        badge_text = 'обязательно' if self._req else 'необязательно'
-        badge_obj = 'slot_badge_req' if self._req else 'slot_badge'
-        b = QLabel(badge_text); b.setObjectName(badge_obj); hdr.addWidget(b)
-        self._clear_btn = QPushButton('✕'); self._clear_btn.setObjectName('slot_clear')
+        badge = QLabel('обязательно' if self._required else 'необязательно')
+        badge.setObjectName('badge_req' if self._required else 'badge_opt')
+        hdr.addWidget(badge)
+        self._clear_btn = QPushButton('✕')
+        self._clear_btn.setObjectName('slot_clear')
         self._clear_btn.setFixedSize(22, 22)
-        self._clear_btn.setToolTip('Очистить слот')
+        self._clear_btn.setToolTip('Очистить')
         self._clear_btn.clicked.connect(self.clear)
         self._clear_btn.hide()
         hdr.addWidget(self._clear_btn)
         lay.addLayout(hdr)
 
-        # Путь / статус
-        self._path_lbl = QLabel('Не выбрано'); self._path_lbl.setObjectName('slot_empty')
+        # Путь
+        self._path_lbl = QLabel('Не выбрано')
+        self._path_lbl.setObjectName('slot_empty')
         self._path_lbl.setWordWrap(True)
         lay.addWidget(self._path_lbl)
 
-        # Инфо о разрешении
-        self._info_lbl = QLabel(''); self._info_lbl.setObjectName('slot_info')
+        # Инфо
+        self._info_lbl = QLabel('')
+        self._info_lbl.setObjectName('slot_info')
         lay.addWidget(self._info_lbl)
 
-        # Кнопки
+        # Кнопки выбора
         btn_row = QHBoxLayout(); btn_row.setSpacing(6)
         for text, tip, slot in [
-            ('📄  Файл',    'Выбрать видеофайл',              self._pick_file),
-            ('📁  Папка',   'Выбрать папку (случайное видео)', self._pick_folder),
-            ('📺  Канал',   'Выбрать из скачанных видео',      self._pick_from_channel),
+            ('📄  Файл',    'Выбрать видеофайл с ПК',          self._pick_file),
+            ('📁  Папка',   'Выбрать папку (случайное видео)',  self._pick_folder),
+            ('📂  Проект',  'Выбрать из папок проекта',        self._pick_project),
+            ('📺  Канал',   'Выбрать из скачанных каналов',    self._pick_channel),
         ]:
             btn = QPushButton(text); btn.setObjectName('slot_pick')
             btn.setToolTip(tip); btn.clicked.connect(slot)
@@ -372,17 +497,27 @@ class VideoSlot(QFrame):
             self, 'Выберите видео', '',
             'Видео (*.mp4 *.mkv *.avi *.mov *.webm *.m4v);;Все файлы (*)'
         )
-        if path: self._set(path, is_folder=False)
+        if path:
+            self._set(path, is_folder=False)
 
     def _pick_folder(self):
         path = QFileDialog.getExistingDirectory(self, 'Выберите папку с видео')
-        if path: self._set(path, is_folder=True)
+        if path:
+            self._set(path, is_folder=True)
 
-    def _pick_from_channel(self):
+    def _pick_project(self):
+        dlg = ProjectVideoPicker(self)
+        if dlg.exec():
+            p = dlg.selected_path()
+            if p:
+                self._set(p, is_folder=False)
+
+    def _pick_channel(self):
         dlg = ChannelVideoPicker(self)
         if dlg.exec():
-            path = dlg.selected_path()
-            if path: self._set(path, is_folder=False)
+            p = dlg.selected_path()
+            if p:
+                self._set(p, is_folder=False)
 
     def _set(self, path, is_folder=False):
         self._path = path
@@ -390,21 +525,18 @@ class VideoSlot(QFrame):
         self.setProperty('filled', 'true')
         self.style().unpolish(self); self.style().polish(self)
         self._clear_btn.show()
-
+        self._path_lbl.setObjectName('slot_path')
         if is_folder:
             try:
                 files = [f for f in os.listdir(path)
                          if os.path.splitext(f)[1].lower() in VIDEO_EXTS]
-                self._path_lbl.setObjectName('slot_path')
                 self._path_lbl.setText(f'📁  {os.path.basename(path)}  ({len(files)} видео)')
                 self._info_lbl.setText('Случайное видео при каждом запуске')
             except Exception:
                 self._path_lbl.setText(f'📁  {path}')
         else:
-            self._path_lbl.setObjectName('slot_path')
             self._path_lbl.setText(f'📄  {os.path.basename(path)}')
             self._load_info(path)
-
         self._path_lbl.style().unpolish(self._path_lbl)
         self._path_lbl.style().polish(self._path_lbl)
         self.changed.emit()
@@ -431,104 +563,33 @@ class VideoSlot(QFrame):
         self._info_lbl.setText('')
         self.changed.emit()
 
-    def resolve_path(self):
-        """Возвращает реальный путь к файлу (для папки — случайный файл)."""
+    def resolve_path(self) -> Optional[str]:
         if not self._path: return None
         if self._is_folder: return _pick_random_video(self._path)
         return self._path
 
-    def path(self): return self._path
-    def is_empty(self): return not bool(self._path)
+    def path(self) -> str: return self._path
+    def is_empty(self) -> bool: return not bool(self._path)
 
-    def set_path(self, path):
+    def set_path(self, path: str):
         if path: self._set(path, is_folder=os.path.isdir(path))
 
 
 # ──────────────────────────────────────────────────────────────────────
-# ДИАЛОГ: ВЫБОР ВИДЕО ИЗ КАНАЛА
+# ИСТОЧНИК ВИДЕО — для сегмента «НАРЕЗКА» (множественный выбор)
 # ──────────────────────────────────────────────────────────────────────
 
-class ChannelVideoPicker(object):
-    """Упрощённый пикер — через QDialog."""
-    from PyQt6.QtWidgets import QDialog
-
-    def __new__(cls, parent=None):
-        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QComboBox, QListWidget, QListWidgetItem, QDialogButtonBox, QLabel
-        dlg = QDialog(parent)
-        dlg.setWindowTitle('Выбрать видео из канала')
-        dlg.setMinimumSize(520, 400)
-        dlg.setStyleSheet(PAGE_QSS + "QDialog{background:#1c1b19;}")
-        lay = QVBoxLayout(dlg)
-        lay.setContentsMargins(16, 16, 16, 16)
-        lay.setSpacing(10)
-
-        lay.addWidget(QLabel('Канал:'))
-        ch_combo = QComboBox(); ch_combo.setObjectName('combo')
-        channels = []
-        try: channels = db.get_all_channels()
-        except: pass
-        for ch in channels:
-            ch_combo.addItem(ch.get('title') or ch.get('url', '?'), ch['id'])
-        lay.addWidget(ch_combo)
-
-        vlist = QListWidget(); vlist.setObjectName('ch_list')
-        lay.addWidget(vlist)
-
-        dlg._selected = ''
-
-        def _load_videos(idx):
-            vlist.clear()
-            ch_id = ch_combo.itemData(idx)
-            if ch_id is None: return
-            try:
-                videos = db.get_videos_by_channel(ch_id, status='downloaded')
-                for v in videos:
-                    fp = v.get('file_path', '')
-                    if fp and os.path.isfile(fp):
-                        item = QListWidgetItem(v.get('title', os.path.basename(fp)))
-                        item.setData(Qt.ItemDataRole.UserRole, fp)
-                        item.setToolTip(fp)
-                        vlist.addItem(item)
-            except: pass
-
-        ch_combo.currentIndexChanged.connect(_load_videos)
-        if ch_combo.count() > 0: _load_videos(0)
-
-        def _on_select():
-            sel = vlist.selectedItems()
-            if sel: dlg._selected = sel[0].data(Qt.ItemDataRole.UserRole)
-            dlg.accept()
-
-        vlist.itemDoubleClicked.connect(lambda _: _on_select())
-
-        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        btns.accepted.connect(_on_select)
-        btns.rejected.connect(dlg.reject)
-        lay.addWidget(btns)
-
-        dlg.selected_path = lambda: dlg._selected
-        return dlg
-
-
-# ──────────────────────────────────────────────────────────────────────
-# ПАНЕЛЬ: ИСТОЧНИК ВИДЕО
-# ──────────────────────────────────────────────────────────────────────
-
-class SourcePanel(QFrame):
+class SourceSelector(QFrame):
     """
-    Выбор главного видео для обработки:
-      - Один файл
-      - Папка (несколько видео, настройки применяются ко всем)
-      - Из скачанных видео каналов
+    Выбор одного или нескольких видео для нарезки.
+    Режимы: Файл | Папка | Из папок проекта
     """
-    source_changed = pyqtSignal()
+    changed = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setObjectName('section_card')
-        self._paths = []   # список файлов для обработки
-        self._channel_id = None
-        self._channel_name = ''
+        self.setObjectName('inner_card')
+        self._paths = []
         self._build()
 
     def _build(self):
@@ -536,203 +597,165 @@ class SourcePanel(QFrame):
         lay.setContentsMargins(14, 12, 14, 14)
         lay.setSpacing(10)
 
-        # Заголовок
-        hdr = QHBoxLayout()
-        t = QLabel('📥  ИСТОЧНИК ВИДЕО'); t.setObjectName('section_title'); hdr.addWidget(t)
-        hdr.addStretch()
-        lay.addLayout(hdr)
+        t = QLabel('📥  ИСТОЧНИК ВИДЕО'); t.setObjectName('card_title')
+        lay.addWidget(t)
         lay.addWidget(_hdiv())
 
-        # Кнопки-переключатели
+        # Кнопки режима
         mode_row = QHBoxLayout(); mode_row.setSpacing(6)
-        self._btn_group = QButtonGroup(self); self._btn_group.setExclusive(True)
-        self._mode_btns = {}
-        for key, label in [('file', '📄  Файл'), ('folder', '📁  Папка'), ('channel', '📺  Канал')]:
-            btn = QPushButton(label); btn.setObjectName('src_btn')
+        self._grp = QButtonGroup(self); self._grp.setExclusive(True)
+        self._btns = {}
+        for key, label in [
+            ('file',    '📄  Файл'),
+            ('folder',  '📁  Папка'),
+            ('project', '📂  Папки проекта'),
+        ]:
+            btn = QPushButton(label); btn.setObjectName('mode_btn')
             btn.setCheckable(True); btn.setFixedHeight(34)
-            self._btn_group.addButton(btn)
-            self._mode_btns[key] = btn
+            self._grp.addButton(btn)
+            self._btns[key] = btn
             mode_row.addWidget(btn)
         mode_row.addStretch()
-        self._mode_btns['file'].setChecked(True)
+        self._btns['file'].setChecked(True)
         lay.addLayout(mode_row)
 
-        # Стек панелей
-        self._stack = QStackedWidget()
-        self._stack.addWidget(self._build_file_panel())    # 0
-        self._stack.addWidget(self._build_folder_panel())  # 1
-        self._stack.addWidget(self._build_channel_panel()) # 2
-        lay.addWidget(self._stack)
+        # Стек: одиночный / список
+        self._single_row = QHBoxLayout(); self._single_row.setSpacing(6)
+        self._single_edit = QLineEdit(); self._single_edit.setObjectName('field')
+        self._single_edit.setPlaceholderText('Путь к видеофайлу...')
+        self._single_edit.setReadOnly(True)
+        self._single_row.addWidget(self._single_edit)
+        pick_btn = QPushButton('Обзор'); pick_btn.setObjectName('btn_secondary')
+        pick_btn.setFixedWidth(74); pick_btn.clicked.connect(self._pick_file)
+        self._single_row.addWidget(pick_btn)
+        self._single_w = QWidget(); self._single_w.setLayout(self._single_row)
+        lay.addWidget(self._single_w)
 
-        self._mode_btns['file'].clicked.connect(lambda: self._set_mode(0))
-        self._mode_btns['folder'].clicked.connect(lambda: self._set_mode(1))
-        self._mode_btns['channel'].clicked.connect(lambda: self._set_mode(2))
+        # Список файлов (папка / проект)
+        self._list_w = QWidget()
+        list_lay = QVBoxLayout(self._list_w); list_lay.setContentsMargins(0,0,0,0); list_lay.setSpacing(6)
+        list_ctrl = QHBoxLayout(); list_ctrl.setSpacing(6)
+        self._pick_folder_btn = QPushButton('📁  Выбрать папку')
+        self._pick_folder_btn.setObjectName('btn_secondary')
+        self._pick_folder_btn.clicked.connect(self._pick_folder)
+        self._pick_project_btn = QPushButton('📂  Выбрать из проекта')
+        self._pick_project_btn.setObjectName('btn_secondary')
+        self._pick_project_btn.clicked.connect(self._pick_project_folder)
+        self._clear_list_btn = QPushButton('Очистить')
+        self._clear_list_btn.setObjectName('btn_secondary')
+        self._clear_list_btn.clicked.connect(self._clear_list)
+        list_ctrl.addWidget(self._pick_folder_btn)
+        list_ctrl.addWidget(self._pick_project_btn)
+        list_ctrl.addStretch()
+        list_ctrl.addWidget(self._clear_list_btn)
+        list_lay.addLayout(list_ctrl)
 
-        # Выбранные файлы
-        self._selected_lbl = _lbl('', 'hint'); lay.addWidget(self._selected_lbl)
+        self._file_list = QListWidget(); self._file_list.setObjectName('file_list')
+        self._file_list.setMaximumHeight(160)
+        list_lay.addWidget(self._file_list)
+        self._list_hint = _lbl('Настройки применятся ко всем файлам', 'hint')
+        list_lay.addWidget(self._list_hint)
 
-    def _build_file_panel(self):
-        w = QWidget()
-        lay = QHBoxLayout(w); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(8)
-        self._file_edit = QLineEdit(); self._file_edit.setObjectName('field')
-        self._file_edit.setPlaceholderText('Путь к видеофайлу...')
-        self._file_edit.textChanged.connect(self._on_file_changed)
-        lay.addWidget(self._file_edit)
-        btn = QPushButton('Обзор'); btn.setObjectName('btn_secondary')
-        btn.setFixedWidth(70); btn.clicked.connect(self._browse_file)
-        lay.addWidget(btn)
-        self._file_info = _lbl('', 'hint')
-        return w
+        self._list_w.hide()
+        lay.addWidget(self._list_w)
 
-    def _build_folder_panel(self):
-        w = QWidget()
-        lay = QVBoxLayout(w); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(6)
-        row = QHBoxLayout(); row.setSpacing(8)
-        self._folder_edit = QLineEdit(); self._folder_edit.setObjectName('field')
-        self._folder_edit.setPlaceholderText('Путь к папке с видео...')
-        self._folder_edit.textChanged.connect(self._on_folder_changed)
-        row.addWidget(self._folder_edit)
-        btn = QPushButton('Обзор'); btn.setObjectName('btn_secondary')
-        btn.setFixedWidth(70); btn.clicked.connect(self._browse_folder)
-        row.addWidget(btn)
-        lay.addLayout(row)
-        self._folder_info = _lbl('', 'hint'); lay.addWidget(self._folder_info)
-        return w
+        # Подключаем переключатели
+        self._btns['file'].toggled.connect(lambda c: self._on_mode('file', c))
+        self._btns['folder'].toggled.connect(lambda c: self._on_mode('folder', c))
+        self._btns['project'].toggled.connect(lambda c: self._on_mode('project', c))
 
-    def _build_channel_panel(self):
-        w = QWidget()
-        lay = QVBoxLayout(w); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(8)
-
-        row1 = QHBoxLayout(); row1.setSpacing(8)
-        row1.addWidget(_lbl('Канал:'))
-        self._ch_combo = _combo([])
-        self._ch_combo.setToolTip('Выберите канал')
-        self._ch_combo.currentIndexChanged.connect(self._load_channel_videos)
-        row1.addWidget(self._ch_combo, stretch=1)
-        lay.addLayout(row1)
-
-        self._ch_list = QListWidget(); self._ch_list.setObjectName('ch_list')
-        self._ch_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self._ch_list.setFixedHeight(120)
-        self._ch_list.setToolTip('Выберите одно или несколько видео (Ctrl+Click для множественного выбора)')
-        self._ch_list.itemSelectionChanged.connect(self._on_channel_selection)
-        lay.addWidget(self._ch_list)
-        return w
-
-    def _set_mode(self, idx):
-        self._stack.setCurrentIndex(idx)
+    def _on_mode(self, mode, checked):
+        if not checked: return
+        self._single_w.setVisible(mode == 'file')
+        self._list_w.setVisible(mode in ('folder', 'project'))
+        if mode == 'folder':
+            self._pick_folder_btn.show()
+            self._pick_project_btn.hide()
+        else:
+            self._pick_folder_btn.hide()
+            self._pick_project_btn.show()
         self._paths = []
-        self._selected_lbl.setText('')
-        if idx == 2: self._refresh_channels()
-        self.source_changed.emit()
+        self._single_edit.clear()
+        self._file_list.clear()
+        self.changed.emit()
 
-    def _browse_file(self):
+    def _pick_file(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, 'Выбрать видео', '',
+            self, 'Выберите видео', '',
             'Видео (*.mp4 *.mkv *.avi *.mov *.webm *.m4v);;Все файлы (*)'
         )
-        if path: self._file_edit.setText(path)
-
-    def _browse_folder(self):
-        path = QFileDialog.getExistingDirectory(self, 'Выбрать папку')
-        if path: self._folder_edit.setText(path)
-
-    def _on_file_changed(self, path):
-        path = path.strip()
-        if os.path.isfile(path):
+        if path:
             self._paths = [path]
-            try:
-                svc = VideoService()
-                info = svc.get_video_info(path)
-                self._selected_lbl.setText(
-                    f'✔  {info.resolution}  ·  {info.duration_str}  ·  {info.size_mb} MB'
-                )
-            except:
-                self._selected_lbl.setText(f'✔  {os.path.basename(path)}')
-        else:
-            self._paths = []
-            self._selected_lbl.setText('')
-        self.source_changed.emit()
+            self._single_edit.setText(path)
+            self.changed.emit()
 
-    def _on_folder_changed(self, path):
-        path = path.strip()
-        if os.path.isdir(path):
-            files = [os.path.join(path, f) for f in os.listdir(path)
-                     if os.path.splitext(f)[1].lower() in VIDEO_EXTS]
-            files.sort()
+    def _pick_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, 'Выберите папку с видео')
+        if folder:
+            files = sorted([
+                os.path.join(folder, f) for f in os.listdir(folder)
+                if os.path.splitext(f)[1].lower() in VIDEO_EXTS
+            ])
             self._paths = files
-            self._folder_info.setText(f'Найдено видео: {len(files)}')
-            self._selected_lbl.setText(f'✔  Папка: {len(files)} видео будут обработаны')
-        else:
-            self._paths = []
-            self._folder_info.setText('')
-            self._selected_lbl.setText('')
-        self.source_changed.emit()
+            self._populate_list(files)
+            self.changed.emit()
 
-    def _refresh_channels(self):
-        self._ch_combo.clear()
-        try:
-            channels = db.get_all_channels()
-            for ch in channels:
-                self._ch_combo.addItem(ch.get('title') or ch.get('url', '?'), ch['id'])
-            if self._ch_combo.count() > 0:
-                self._load_channel_videos(0)
-        except: pass
+    def _pick_project_folder(self):
+        folders = _scan_project_folders()
+        if not folders:
+            return
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QComboBox, QDialogButtonBox
+        dlg = QDialog(self)
+        dlg.setWindowTitle('Выбрать папку проекта')
+        dlg.setMinimumWidth(400)
+        dlg.setStyleSheet(PAGE_QSS + "QDialog{background:#1c1b19;}")
+        dlg_lay = QVBoxLayout(dlg)
+        dlg_lay.setContentsMargins(16, 16, 16, 16); dlg_lay.setSpacing(10)
+        dlg_lay.addWidget(_lbl('Папка:'))
+        combo = QComboBox(); combo.setObjectName('combo')
+        for name, files in folders.items():
+            combo.addItem(f'📁  {name}  ({len(files)} файлов)', files)
+        dlg_lay.addWidget(combo)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(dlg.accept); btns.rejected.connect(dlg.reject)
+        dlg_lay.addWidget(btns)
+        if dlg.exec():
+            files = combo.currentData() or []
+            self._paths = files
+            self._populate_list(files)
+            self.changed.emit()
 
-    def _load_channel_videos(self, idx):
-        self._ch_list.clear()
+    def _populate_list(self, files):
+        self._file_list.clear()
+        for fp in files:
+            item = QListWidgetItem(f'🎬  {os.path.basename(fp)}')
+            item.setData(Qt.ItemDataRole.UserRole, fp)
+            item.setToolTip(fp)
+            self._file_list.addItem(item)
+
+    def _clear_list(self):
         self._paths = []
-        ch_id = self._ch_combo.itemData(idx)
-        self._channel_id = ch_id
-        self._channel_name = self._ch_combo.currentText()
-        if ch_id is None: return
-        try:
-            videos = db.get_videos_by_channel(ch_id, status='downloaded')
-            for v in videos:
-                fp = v.get('file_path', '')
-                if fp and os.path.isfile(fp):
-                    item = QListWidgetItem(v.get('title', os.path.basename(fp)))
-                    item.setData(Qt.ItemDataRole.UserRole, (fp, v.get('title', '')))
-                    item.setToolTip(fp)
-                    self._ch_list.addItem(item)
-        except: pass
+        self._file_list.clear()
+        self.changed.emit()
 
-    def _on_channel_selection(self):
-        sel = self._ch_list.selectedItems()
-        self._paths = [it.data(Qt.ItemDataRole.UserRole)[0] for it in sel]
-        n = len(sel)
-        self._selected_lbl.setText(f'✔  Выбрано: {n} видео' if n else '')
-        self.source_changed.emit()
+    def get_paths(self) -> list:
+        return [p for p in self._paths if os.path.isfile(p)]
 
-    def get_paths(self):
-        """Возвращает список путей к видео для обработки."""
-        return list(self._paths)
-
-    def get_channel_info(self):
-        """Возвращает (channel_id, channel_name) или (None, '')."""
-        if self._mode_btns['channel'].isChecked():
-            return self._channel_id, self._channel_name
-        return None, ''
-
-    def get_video_title(self, path):
-        """Возвращает название видео (из канала или имя файла)."""
-        if self._mode_btns['channel'].isChecked():
-            for i in range(self._ch_list.count()):
-                item = self._ch_list.item(i)
-                data = item.data(Qt.ItemDataRole.UserRole)
-                if data and data[0] == path:
-                    return data[1] or os.path.splitext(os.path.basename(path))[0]
-        return os.path.splitext(os.path.basename(path))[0]
+    def is_empty(self) -> bool:
+        return len(self.get_paths()) == 0
 
 
 # ──────────────────────────────────────────────────────────────────────
-# ПАНЕЛЬ: НАРЕЗКА
+# НАСТРОЙКИ НАРЕЗКИ (переиспользуется в обоих сегментах)
 # ──────────────────────────────────────────────────────────────────────
 
-class CutPanel(QFrame):
-    def __init__(self, parent=None):
+class CutSettings(QFrame):
+    """Блок настроек нарезки: режим, длительность/кол-во, нумерация, имя."""
+
+    def __init__(self, title='✂  НАРЕЗКА НА СЕГМЕНТЫ', parent=None):
         super().__init__(parent)
-        self.setObjectName('section_card')
+        self.setObjectName('inner_card')
+        self._title = title
         self._build()
 
     def _build(self):
@@ -740,85 +763,88 @@ class CutPanel(QFrame):
         lay.setContentsMargins(14, 12, 14, 14)
         lay.setSpacing(10)
 
+        # Заголовок с переключателем вкл/выкл
         hdr = QHBoxLayout()
-        self._enabled = QCheckBox('✂  НАРЕЗКА'); self._enabled.setObjectName('chk')
-        self._enabled.setStyleSheet('QCheckBox{color:#cdccca;font-size:12px;font-weight:700;}')
+        self._enabled = QCheckBox(self._title)
+        self._enabled.setObjectName('chk')
+        self._enabled.setStyleSheet('QCheckBox{color:#cdccca;font-size:12px;font-weight:700;} '
+                                     'QCheckBox::indicator{width:16px;height:16px;border-radius:4px;'
+                                     'border:1px solid #393836;background:#201f1d;} '
+                                     'QCheckBox::indicator:checked{background:#4f98a3;border-color:#4f98a3;}')
         self._enabled.toggled.connect(self._on_toggle)
         hdr.addWidget(self._enabled); hdr.addStretch()
         lay.addLayout(hdr)
         lay.addWidget(_hdiv())
 
         self._body = QWidget()
-        body_lay = QGridLayout(self._body)
-        body_lay.setSpacing(8)
-        body_lay.setColumnMinimumWidth(0, 160)
-        body_lay.setColumnStretch(1, 1)
+        body = QGridLayout(self._body)
+        body.setSpacing(8); body.setColumnMinimumWidth(0, 140); body.setColumnStretch(1, 1)
 
         # Режим нарезки
-        body_lay.addWidget(_lbl('Режим нарезки:'), 0, 0)
-        mode_w = QWidget(); mode_lay = QHBoxLayout(mode_w)
-        mode_lay.setContentsMargins(0,0,0,0); mode_lay.setSpacing(10)
-        self._mode_time  = QRadioButton('По времени'); self._mode_time.setObjectName('radio')
-        self._mode_count = QRadioButton('По количеству'); self._mode_count.setObjectName('radio')
-        self._mode_time.setChecked(True)
-        self._mode_time.toggled.connect(self._on_mode_toggle)
-        mode_lay.addWidget(self._mode_time); mode_lay.addWidget(self._mode_count)
-        mode_lay.addStretch()
-        body_lay.addWidget(mode_w, 0, 1)
+        body.addWidget(_lbl('Режим нарезки:'), 0, 0)
+        mode_w = QWidget(); ml = QHBoxLayout(mode_w)
+        ml.setContentsMargins(0,0,0,0); ml.setSpacing(12)
+        self._by_time  = QRadioButton('По длительности'); self._by_time.setObjectName('radio')
+        self._by_count = QRadioButton('По количеству');   self._by_count.setObjectName('radio')
+        self._by_time.setChecked(True)
+        self._by_time.toggled.connect(self._on_mode_toggle)
+        ml.addWidget(self._by_time); ml.addWidget(self._by_count); ml.addStretch()
+        body.addWidget(mode_w, 0, 1)
 
         # Длительность
-        body_lay.addWidget(_lbl('Длительность клипа:'), 1, 0)
-        dur_w = QWidget(); dur_lay = QHBoxLayout(dur_w)
-        dur_lay.setContentsMargins(0,0,0,0); dur_lay.setSpacing(6)
-        self._duration = _spin(1, 3600, 60, ' сек')
-        self._duration.setToolTip('Длина каждого клипа в секундах')
-        dur_lay.addWidget(self._duration); dur_lay.addStretch()
-        body_lay.addWidget(dur_w, 1, 1)
+        self._dur_lbl = _lbl('Длительность (сек):')
+        body.addWidget(self._dur_lbl, 1, 0)
+        dur_w = QWidget(); dl = QHBoxLayout(dur_w)
+        dl.setContentsMargins(0,0,0,0); dl.setSpacing(6)
+        self._duration = _spin(1, 7200, 60, ' сек')
+        dl.addWidget(self._duration)
+        dl.addWidget(_lbl('(каждый сегмент)', 'hint'))
+        dl.addStretch()
+        body.addWidget(dur_w, 1, 1)
 
-        # Количество фрагментов
-        self._count_row_lbl = _lbl('Количество клипов:')
-        body_lay.addWidget(self._count_row_lbl, 2, 0)
-        cnt_w = QWidget(); cnt_lay = QHBoxLayout(cnt_w)
-        cnt_lay.setContentsMargins(0,0,0,0); cnt_lay.setSpacing(6)
+        # Количество
+        self._cnt_lbl = _lbl('Количество сегментов:')
+        body.addWidget(self._cnt_lbl, 2, 0)
+        cnt_w = QWidget(); cl = QHBoxLayout(cnt_w)
+        cl.setContentsMargins(0,0,0,0); cl.setSpacing(6)
         self._clip_count = _spin(2, 9999, 10, ' шт')
-        self._clip_count.setToolTip('Видео будет разделено на N равных частей')
-        cnt_lay.addWidget(self._clip_count)
-        self._count_hint = _lbl('длительность подстроится автоматически', 'hint')
-        cnt_lay.addWidget(self._count_hint); cnt_lay.addStretch()
-        body_lay.addWidget(cnt_w, 2, 1)
-        # По умолчанию скрываем строку количества
-        self._count_row_lbl.hide(); cnt_w.hide()
-        self._cnt_w = cnt_w  # сохраняем ссылку
+        cl.addWidget(self._clip_count)
+        cl.addWidget(_lbl('длительность подстроится автоматически', 'hint'))
+        cl.addStretch()
+        body.addWidget(cnt_w, 2, 1)
+        self._cnt_lbl.hide(); cnt_w.hide()
+        self._cnt_w = cnt_w
 
-        # Название файлов
-        body_lay.addWidget(_lbl('Название нарезок:'), 3, 0)
-        name_w = QWidget(); name_lay = QVBoxLayout(name_w)
-        name_lay.setContentsMargins(0,0,0,0); name_lay.setSpacing(4)
-        self._name_original = QRadioButton('Оригинальное название видео')
-        self._name_original.setObjectName('radio'); self._name_original.setChecked(True)
-        self._name_custom = QRadioButton('Своё название:')
-        self._name_custom.setObjectName('radio')
+        # Нумерация
+        body.addWidget(_lbl('Нумерация:'), 3, 0)
+        num_w = QWidget(); nl = QHBoxLayout(num_w)
+        nl.setContentsMargins(0,0,0,0); nl.setSpacing(12)
+        self._num_on  = QRadioButton('Включить  (001, 002...)'); self._num_on.setObjectName('radio')
+        self._num_off = QRadioButton('Выключить'); self._num_off.setObjectName('radio')
+        self._num_on.setChecked(True)
+        nl.addWidget(self._num_on); nl.addWidget(self._num_off); nl.addStretch()
+        body.addWidget(num_w, 3, 1)
+
+        # Имя файла
+        body.addWidget(_lbl('Имя файла:'), 4, 0)
+        name_w = QWidget(); nml = QHBoxLayout(name_w)
+        nml.setContentsMargins(0,0,0,0); nml.setSpacing(6)
+        self._name_auto   = QRadioButton('Из исходного'); self._name_auto.setObjectName('radio')
+        self._name_custom = QRadioButton('Своё:');        self._name_custom.setObjectName('radio')
+        self._name_auto.setChecked(True)
         self._name_edit = QLineEdit(); self._name_edit.setObjectName('field')
         self._name_edit.setPlaceholderText('clip')
         self._name_edit.setEnabled(False)
-        self._name_original.toggled.connect(lambda c: self._name_edit.setEnabled(not c))
-        name_lay.addWidget(self._name_original)
-        name_lay.addWidget(self._name_custom)
-        name_lay.addWidget(self._name_edit)
-        body_lay.addWidget(name_w, 3, 1)
-
-        # Нумерация
-        body_lay.addWidget(_lbl('Нумерация файлов:'), 4, 0)
-        self._numbering = QCheckBox('Включить нумерацию (001, 002...)')
-        self._numbering.setObjectName('chk'); self._numbering.setChecked(True)
-        body_lay.addWidget(self._numbering, 4, 1)
+        self._name_auto.toggled.connect(lambda c: self._name_edit.setEnabled(not c))
+        nml.addWidget(self._name_auto); nml.addWidget(self._name_custom)
+        nml.addWidget(self._name_edit); nml.addStretch()
+        body.addWidget(name_w, 4, 1)
 
         # Перекодировка
-        body_lay.addWidget(_lbl('Перекодировать:'), 5, 0)
+        body.addWidget(_lbl('Перекодировать:'), 5, 0)
         self._reencode = QCheckBox('Libx264 (для дальнейшей склейки)')
         self._reencode.setObjectName('chk')
-        self._reencode.setToolTip('Без перекодировки — быстро, но менее совместимо.\nВключи если клипы нужно дальше склеивать.')
-        body_lay.addWidget(self._reencode, 5, 1)
+        body.addWidget(self._reencode, 5, 1)
 
         lay.addWidget(self._body)
         self._body.setEnabled(False)
@@ -827,400 +853,336 @@ class CutPanel(QFrame):
         self._body.setEnabled(checked)
 
     def _on_mode_toggle(self, time_checked):
+        self._dur_lbl.setEnabled(time_checked)
         self._duration.setEnabled(time_checked)
-        self._count_row_lbl.setVisible(not time_checked)
+        self._cnt_lbl.setVisible(not time_checked)
         self._cnt_w.setVisible(not time_checked)
 
-    def is_enabled(self): return self._enabled.isChecked()
+    def is_enabled(self) -> bool:
+        return self._enabled.isChecked()
 
-    def get_prefix(self, original_title=''):
-        if self._name_original.isChecked():
+    def get_prefix(self, original_title='') -> str:
+        if self._name_auto.isChecked():
             return _sanitize(original_title) if original_title else 'clip'
         return _sanitize(self._name_edit.text().strip()) or 'clip'
 
-    def get_settings(self):
-        by_count = self._mode_count.isChecked()
+    def get_settings(self) -> dict:
+        by_count = self._by_count.isChecked()
         return {
+            'enabled':    self.is_enabled(),
             'duration':   self._duration.value(),
             'clip_count': self._clip_count.value() if by_count else 0,
             'by_count':   by_count,
-            'numbering':  self._numbering.isChecked(),
+            'numbering':  self._num_on.isChecked(),
             'reencode':   self._reencode.isChecked(),
         }
 
 
 # ──────────────────────────────────────────────────────────────────────
-# ПАНЕЛЬ: КОМПОЗИЦИЯ (стекинг)
+# СЕГМЕНТ 1: НАРЕЗКА
 # ──────────────────────────────────────────────────────────────────────
 
-class CompositionPanel(QFrame):
+class SegmentCut(QWidget):
+    """
+    Сегмент 1 — Нарезка:
+      • Выбор источника (файл / папка / папки проекта)
+      • Настройки нарезки на сегменты
+      • Папка вывода
+    """
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setObjectName('section_card')
         self._build()
 
     def _build(self):
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(14, 12, 14, 14)
-        lay.setSpacing(10)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
 
-        hdr = QHBoxLayout()
-        self._enabled = QCheckBox('🎞  КОМПОЗИЦИЯ / СТЕКИНГ')
-        self._enabled.setObjectName('chk')
-        self._enabled.setStyleSheet('QCheckBox{color:#cdccca;font-size:12px;font-weight:700;}')
-        self._enabled.toggled.connect(self._on_toggle)
-        hdr.addWidget(self._enabled); hdr.addStretch()
-        lay.addLayout(hdr)
-        lay.addWidget(_hdiv())
+        # Заголовок сегмента
+        hdr = QFrame(); hdr.setObjectName('seg_header')
+        hdr_lay = QHBoxLayout(hdr)
+        hdr_lay.setContentsMargins(16, 12, 16, 12)
+        hdr_lay.setSpacing(10)
+        num = QLabel('1'); num.setObjectName('seg_num')
+        num.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hdr_lay.addWidget(num)
+        info = QVBoxLayout(); info.setSpacing(2)
+        info.addWidget(_make_seg_title('НАРЕЗКА'))
+        info.addWidget(_lbl('Выберите видео и параметры нарезки на сегменты', 'seg_sub'))
+        hdr_lay.addLayout(info)
+        hdr_lay.addStretch()
+        lay.addWidget(hdr)
 
-        self._body = QWidget()
-        body_lay = QVBoxLayout(self._body)
-        body_lay.setContentsMargins(0,0,0,0); body_lay.setSpacing(10)
+        # Тело сегмента
+        body = QFrame(); body.setObjectName('seg_body')
+        body_lay = QVBoxLayout(body)
+        body_lay.setContentsMargins(16, 16, 16, 16)
+        body_lay.setSpacing(12)
 
-        # Слоты
-        self.slot_top    = VideoSlot('top')
-        self.slot_bottom = VideoSlot('bottom')
-        self.slot_bg     = VideoSlot('bg')
-        body_lay.addWidget(self.slot_top)
-        body_lay.addWidget(self.slot_bottom)
-        body_lay.addWidget(self.slot_bg)
+        # Источник
+        self.source = SourceSelector()
+        body_lay.addWidget(self.source)
 
-        # Аудио источник
-        aud = QHBoxLayout(); aud.setSpacing(8)
-        aud.addWidget(_lbl('Источник аудио:'))
-        self._audio = _combo(['Центр (главное)', 'Верх (баннер)', 'Низ (фон)', 'Без звука'])
-        self._audio.setToolTip('Звук из какого слота попадёт в итоговое видео')
-        aud.addWidget(self._audio); aud.addStretch()
-        body_lay.addLayout(aud)
-
-        body_lay.addWidget(_hdiv())
-
-        # Нарезать результат
-        body_lay.addWidget(_hdiv())
-
-        # ── Нарезка результата (встроенная) ──
-        self._cut_after = QCheckBox('✂  Нарезать результат после рендеринга')
-        self._cut_after.setObjectName('chk')
-        body_lay.addWidget(self._cut_after)
-        self._cut_after.toggled.connect(self._on_cut_toggle)
-
-        # Контейнер настроек нарезки
-        self._cut_box = QWidget()
-        cut_lay = QGridLayout(self._cut_box)
-        cut_lay.setContentsMargins(16, 4, 0, 0)
-        cut_lay.setSpacing(6)
-
-        # Режим
-        cut_lay.addWidget(_lbl('Режим:'), 0, 0)
-        mode_w2 = QWidget(); ml2 = QHBoxLayout(mode_w2)
-        ml2.setContentsMargins(0,0,0,0); ml2.setSpacing(10)
-        self._cmode_time  = QRadioButton('По времени'); self._cmode_time.setObjectName('radio')
-        self._cmode_count = QRadioButton('По количеству'); self._cmode_count.setObjectName('radio')
-        self._cmode_time.setChecked(True)
-        self._cmode_time.toggled.connect(self._on_cut_mode_toggle)
-        ml2.addWidget(self._cmode_time); ml2.addWidget(self._cmode_count); ml2.addStretch()
-        cut_lay.addWidget(mode_w2, 0, 1)
-
-        # Длительность
-        self._cdur_lbl = _lbl('Длительность:')
-        cut_lay.addWidget(self._cdur_lbl, 1, 0)
-        cdw = QWidget(); cdl = QHBoxLayout(cdw)
-        cdl.setContentsMargins(0,0,0,0); cdl.setSpacing(4)
-        self._cduration = _spin(1, 3600, 60, ' сек')
-        cdl.addWidget(self._cduration); cdl.addStretch()
-        cut_lay.addWidget(cdw, 1, 1)
-
-        # Количество
-        self._ccnt_lbl = _lbl('Количество:')
-        cut_lay.addWidget(self._ccnt_lbl, 2, 0)
-        ccw = QWidget(); ccl = QHBoxLayout(ccw)
-        ccl.setContentsMargins(0,0,0,0); ccl.setSpacing(4)
-        self._cclip_count = _spin(2, 9999, 10, ' шт')
-        self._ccount_hint = _lbl('время подстроится автоматически', 'hint')
-        ccl.addWidget(self._cclip_count); ccl.addWidget(self._ccount_hint); ccl.addStretch()
-        cut_lay.addWidget(ccw, 2, 1)
-
-        # Перекодировка
-        cut_lay.addWidget(_lbl('Перекодировать:'), 3, 0)
-        self._creencode = QCheckBox('Да (медленнее, точнее)'); self._creencode.setObjectName('chk')
-        cut_lay.addWidget(self._creencode, 3, 1)
-
-        self._cut_box.hide()
-        self._ccnt_lbl.hide(); ccw.hide()
-        self._ccw = ccw
-        body_lay.addWidget(self._cut_box)
-
-        lay.addWidget(self._body)
-        self._body.setEnabled(False)
-
-    def _on_toggle(self, checked):
-        self._body.setEnabled(checked)
-
-    def _on_cut_toggle(self, checked):
-        self._cut_box.setVisible(checked)
-
-    def _on_cut_mode_toggle(self, time_checked):
-        self._cdur_lbl.setEnabled(time_checked)
-        self._cduration.setEnabled(time_checked)
-        self._ccnt_lbl.setVisible(not time_checked)
-        self._ccw.setVisible(not time_checked)
-
-    def is_enabled(self): return self._enabled.isChecked()
-
-    def get_settings(self):
-        audio_map = ['center', 'top', 'bottom', 'none']
-        by_count = self._cmode_count.isChecked()
-        return {
-            'top_path':    self.slot_top.resolve_path(),
-            'bottom_path': self.slot_bottom.resolve_path(),
-            'bg_path':     self.slot_bg.resolve_path(),
-            'audio_source': audio_map[self._audio.currentIndex()],
-            'cut_after':   self._cut_after.isChecked(),
-            'cut_duration': self._cduration.value(),
-            'cut_clip_count': self._cclip_count.value() if by_count else 0,
-            'cut_reencode':  self._creencode.isChecked(),
-        }
-
-
-# ──────────────────────────────────────────────────────────────────────
-# ПАНЕЛЬ: СУБТИТРЫ
-# ──────────────────────────────────────────────────────────────────────
-
-class SubtitlePanel(QFrame):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName('section_card')
-        self._build()
-
-    def _build(self):
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(14, 12, 14, 14)
-        lay.setSpacing(10)
-
-        hdr = QHBoxLayout()
-        self._enabled = QCheckBox('💬  СУБТИТРЫ')
-        self._enabled.setObjectName('chk')
-        self._enabled.setStyleSheet('QCheckBox{color:#cdccca;font-size:12px;font-weight:700;}')
-        self._enabled.toggled.connect(self._on_toggle)
-        hdr.addWidget(self._enabled); hdr.addStretch()
-        lay.addLayout(hdr)
-        lay.addWidget(_hdiv())
-
-        self._body = QWidget()
-        body_lay = QGridLayout(self._body)
-        body_lay.setSpacing(8)
-        body_lay.setColumnMinimumWidth(0, 130)
-        body_lay.setColumnStretch(1, 1)
-
-        # SRT файл
-        body_lay.addWidget(_lbl('Файл субтитров:'), 0, 0)
-        srt_row = QHBoxLayout(); srt_row.setSpacing(6)
-        self._srt_edit = QLineEdit(); self._srt_edit.setObjectName('field')
-        self._srt_edit.setPlaceholderText('Выберите .srt файл...')
-        srt_row.addWidget(self._srt_edit)
-        srt_btn = QPushButton('Обзор'); srt_btn.setObjectName('btn_secondary')
-        srt_btn.setFixedWidth(70)
-        srt_btn.clicked.connect(self._browse_srt)
-        srt_row.addWidget(srt_btn)
-        srt_w = QWidget(); srt_w.setLayout(srt_row)
-        body_lay.addWidget(srt_w, 0, 1)
-
-        body_lay.addWidget(_lbl('Размер шрифта:'), 1, 0)
-        self._size = _spin(12, 72, 32, ' pt')
-        body_lay.addWidget(self._size, 1, 1)
-
-        body_lay.addWidget(_lbl('Цвет текста:'), 2, 0)
-        self._color = _combo(['Белый', 'Жёлтый', 'Чёрный'])
-        body_lay.addWidget(self._color, 2, 1)
-
-        note = _lbl('⚠ Требуется ffmpeg с поддержкой libass', 'hint')
-        body_lay.addWidget(note, 3, 0, 1, 2)
-
-        lay.addWidget(self._body)
-        self._body.setEnabled(False)
-
-    def _on_toggle(self, checked):
-        self._body.setEnabled(checked)
-
-    def _browse_srt(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, 'Выбрать субтитры', '',
-            'Субтитры (*.srt *.ass *.vtt);;Все файлы (*)'
-        )
-        if path: self._srt_edit.setText(path)
-
-    def is_enabled(self): return self._enabled.isChecked()
-
-    def get_settings(self):
-        color_map = {'Белый': 'white', 'Жёлтый': 'yellow', 'Чёрный': 'black'}
-        return {
-            'subtitle_path':  self._srt_edit.text().strip() or None,
-            'subtitle_size':  self._size.value(),
-            'subtitle_color': color_map.get(self._color.currentText(), 'white'),
-        }
-
-
-# ──────────────────────────────────────────────────────────────────────
-# ПАНЕЛЬ: ФОРМАТ И ПРОПОРЦИИ
-# ──────────────────────────────────────────────────────────────────────
-
-class FormatPanel(QFrame):
-    changed = pyqtSignal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName('section_card')
-        self._active = 'original'
-        self._build()
-
-    def _build(self):
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(14, 12, 14, 14)
-        lay.setSpacing(10)
-
-        hdr = QHBoxLayout()
-        t = QLabel('🎬  ФОРМАТ И РАЗРЕШЕНИЕ'); t.setObjectName('section_title')
-        hdr.addWidget(t); hdr.addStretch()
-        lay.addLayout(hdr)
-        lay.addWidget(_hdiv())
-
-        # Кнопки форматов
-        fmt_row = QHBoxLayout(); fmt_row.setSpacing(6)
-        self._fmt_btns = {}
-        self._fmt_group = QButtonGroup(self); self._fmt_group.setExclusive(True)
-        for key, cfg in FORMAT_PRESETS.items():
-            btn = QPushButton(f'{cfg["label"]}\n{cfg["ratio"]}')
-            btn.setObjectName('fmt_btn'); btn.setCheckable(True)
-            btn.setFixedSize(78, 48)
-            btn.setToolTip(f'{cfg["label"]} — {cfg["ratio"]}\n{cfg["w"]}×{cfg["h"]} px' if cfg['w'] else 'Сохранять оригинальное разрешение')
-            btn.clicked.connect(lambda _, k=key: self._select(k))
-            self._fmt_btns[key] = btn
-            self._fmt_group.addButton(btn)
-            fmt_row.addWidget(btn)
-        fmt_row.addStretch()
-        lay.addLayout(fmt_row)
-        self._fmt_btns['original'].setChecked(True)
-
-        self._fmt_hint = _lbl('Оригинальные пропорции сохраняются', 'hint')
-        lay.addWidget(self._fmt_hint)
-
-        lay.addWidget(_hdiv())
-
-        # Ручные пропорции
-        self._custom_chk = QCheckBox('Задать пропорции вручную')
-        self._custom_chk.setObjectName('chk')
-        self._custom_chk.toggled.connect(self._on_custom_toggle)
-        lay.addWidget(self._custom_chk)
-
-        self._custom_body = QWidget()
-        cust_lay = QGridLayout(self._custom_body)
-        cust_lay.setSpacing(8); cust_lay.setColumnMinimumWidth(0, 130)
-        cust_lay.addWidget(_lbl('Ширина (px):'), 0, 0)
-        self._custom_w = _spin(100, 7680, 1080)
-        cust_lay.addWidget(self._custom_w, 0, 1)
-        cust_lay.addWidget(_lbl('Высота (px):'), 1, 0)
-        self._custom_h = _spin(100, 7680, 1920)
-        cust_lay.addWidget(self._custom_h, 1, 1)
-        self._custom_body.setEnabled(False)
-        lay.addWidget(self._custom_body)
-
-        # Качество + фон
-        grid2 = QGridLayout(); grid2.setSpacing(8); grid2.setColumnMinimumWidth(0, 130); grid2.setColumnStretch(1, 1)
-        grid2.addWidget(_lbl('Качество кодирования:'), 0, 0)
-        self._quality = _combo(['Быстро (fast)', 'Хорошо (medium)', 'Лучшее (slow)'])
-        self._quality.setToolTip('fast — быстро\nmedium — баланс\nslow — максимальное качество')
-        grid2.addWidget(self._quality, 0, 1)
-        grid2.addWidget(_lbl('Цвет фона (паддинг):'), 1, 0)
-        self._bg = _combo(['Чёрный', 'Белый', 'Серый'])
-        self._bg.setToolTip('Цвет заливки пустых областей')
-        grid2.addWidget(self._bg, 1, 1)
-        lay.addLayout(grid2)
-
-    def _select(self, key):
-        self._active = key
-        cfg = FORMAT_PRESETS[key]
-        if cfg['w']:
-            self._fmt_hint.setText(f'{cfg["w"]}×{cfg["h"]} px  —  {cfg["ratio"]}')
-        else:
-            self._fmt_hint.setText('Оригинальные пропорции сохраняются')
-        self.changed.emit()
-
-    def _on_custom_toggle(self, checked):
-        self._custom_body.setEnabled(checked)
-        if checked: self._active = 'custom'
-        else: self._active = 'original'
-
-    def get_settings(self):
-        quality_map = {'Быстро (fast)': 'fast', 'Хорошо (medium)': 'medium', 'Лучшее (slow)': 'slow'}
-        bg_map = {'Чёрный': 'black', 'Белый': 'white', 'Серый': 'gray'}
-        cfg = FORMAT_PRESETS.get(self._active, FORMAT_PRESETS['original'])
-        if self._custom_chk.isChecked():
-            w, h = self._custom_w.value(), self._custom_h.value()
-        else:
-            w, h = cfg['w'], cfg['h']
-        return {
-            'format_key':     self._active,
-            'output_width':   w or 1080,
-            'output_height':  h or 1920,
-            'top_h':          cfg.get('top', 0),
-            'center_h':       cfg.get('center', 0) or (h or 1920),
-            'bottom_h':       cfg.get('bottom', 0),
-            'quality':        quality_map.get(self._quality.currentText(), 'fast'),
-            'bg_color':       bg_map.get(self._bg.currentText(), 'black'),
-        }
-
-
-# ──────────────────────────────────────────────────────────────────────
-# ПАНЕЛЬ: ПАРАМЕТРЫ ВЫВОДА
-# ──────────────────────────────────────────────────────────────────────
-
-class OutputPanel(QFrame):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName('section_card')
-        self._build()
-
-    def _build(self):
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(14, 12, 14, 14)
-        lay.setSpacing(10)
-
-        hdr = QHBoxLayout()
-        t = QLabel('💾  ПАРАМЕТРЫ ВЫВОДА'); t.setObjectName('section_title')
-        hdr.addWidget(t); hdr.addStretch()
-        lay.addLayout(hdr)
-        lay.addWidget(_hdiv())
-
-        grid = QGridLayout(); grid.setSpacing(8)
-        grid.setColumnMinimumWidth(0, 130); grid.setColumnStretch(1, 1)
+        # Нарезка
+        self.cut = CutSettings('✂  НАРЕЗКА НА СЕГМЕНТЫ')
+        body_lay.addWidget(self.cut)
 
         # Папка вывода
-        grid.addWidget(_lbl('Папка вывода:'), 0, 0)
+        out_card = QFrame(); out_card.setObjectName('inner_card')
+        out_lay = QVBoxLayout(out_card)
+        out_lay.setContentsMargins(14, 12, 14, 12); out_lay.setSpacing(8)
+        out_lay.addWidget(_lbl('💾  ПАПКА ВЫВОДА', 'card_title'))
+        out_lay.addWidget(_hdiv())
         out_row = QHBoxLayout(); out_row.setSpacing(6)
         self._out_edit = QLineEdit(); self._out_edit.setObjectName('field')
-        self._out_edit.setPlaceholderText('processed\\название_канала\\название_видео  (авто)')
-        self._out_edit.setToolTip('Оставь пустым для автоматического пути:\nprocessed\\канал\\видео')
+        self._out_edit.setPlaceholderText('processed/  (авто)')
         out_row.addWidget(self._out_edit)
         out_btn = QPushButton('Обзор'); out_btn.setObjectName('btn_secondary')
-        out_btn.setFixedWidth(70); out_btn.clicked.connect(self._browse_out)
+        out_btn.setFixedWidth(74)
+        out_btn.clicked.connect(self._browse_out)
         out_row.addWidget(out_btn)
-        out_w = QWidget(); out_w.setLayout(out_row)
-        grid.addWidget(out_w, 0, 1)
+        out_lay.addLayout(out_row)
+        out_lay.addWidget(_lbl('Оставь пустым — сохранится в processed/название_видео', 'hint'))
+        body_lay.addWidget(out_card)
 
-        lay.addLayout(grid)
-        lay.addWidget(_lbl('Если пусто — сохраняется в processed\\канал\\видео', 'hint'))
+        lay.addWidget(body)
 
     def _browse_out(self):
-        path = QFileDialog.getExistingDirectory(self, 'Выбрать папку вывода')
-        if path: self._out_edit.setText(path)
+        p = QFileDialog.getExistingDirectory(self, 'Папка вывода')
+        if p: self._out_edit.setText(p)
 
-    def get_output_dir(self, channel_name='', video_title=''):
+    def get_output_dir(self, title='') -> str:
         manual = self._out_edit.text().strip()
         if manual: return manual
-        parts = ['processed']
-        if channel_name: parts.append(_sanitize(channel_name))
-        if video_title:  parts.append(_sanitize(video_title))
-        return os.path.join(BASE_DIR, *parts)
+        parts = [BASE_DIR, 'processed']
+        if title: parts.append(_sanitize(title))
+        return os.path.join(*parts)
+
+    def is_ready(self) -> bool:
+        return not self.source.is_empty() and self.cut.is_enabled()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# СЕГМЕНТ 2: КОМПОЗИЦИЯ
+# ──────────────────────────────────────────────────────────────────────
+
+class SegmentCompose(QWidget):
+    """
+    Сегмент 2 — Композиция:
+      • Главный ролик (центр)
+      • Баннер (верх, вплотную к главному)
+      • Видео удержания (низ, вплотную к главному)
+      • Фон (закрывает промежутки)
+      • Нарезка результата
+      • Папка вывода
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._build()
+
+    def _build(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        # Заголовок сегмента
+        hdr = QFrame(); hdr.setObjectName('seg_header')
+        hdr_lay = QHBoxLayout(hdr)
+        hdr_lay.setContentsMargins(16, 12, 16, 12)
+        hdr_lay.setSpacing(10)
+        num = QLabel('2'); num.setObjectName('seg_num')
+        num.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hdr_lay.addWidget(num)
+        info = QVBoxLayout(); info.setSpacing(2)
+        info.addWidget(_make_seg_title('КОМПОЗИЦИЯ'))
+        info.addWidget(_lbl('Сложите видео в вертикальный стек и нарежьте результат', 'seg_sub'))
+        hdr_lay.addLayout(info)
+        hdr_lay.addStretch()
+        lay.addWidget(hdr)
+
+        # Тело сегмента
+        body = QFrame(); body.setObjectName('seg_body')
+        body_lay = QVBoxLayout(body)
+        body_lay.setContentsMargins(16, 16, 16, 16)
+        body_lay.setSpacing(12)
+
+        # ── Схема композиции ──
+        scheme_card = QFrame(); scheme_card.setObjectName('inner_card')
+        scheme_lay = QVBoxLayout(scheme_card)
+        scheme_lay.setContentsMargins(14, 12, 14, 12); scheme_lay.setSpacing(4)
+        scheme_lay.addWidget(_lbl('🎨  СХЕМА СТЕКА', 'card_title'))
+        scheme_lay.addWidget(_hdiv())
+        scheme_info = QLabel(
+            '  ┌─────────────────────┐\n'
+            '  │   📢 БАННЕР (верх)  │  ← вплотную к главному\n'
+            '  ├─────────────────────┤\n'
+            '  │  🎬 ГЛАВНЫЙ РОЛИК   │  ← центр (обязательно)\n'
+            '  ├─────────────────────┤\n'
+            '  │  🎮 УДЕРЖАНИЕ (низ) │  ← вплотную к главному\n'
+            '  └─────────────────────┘\n'
+            '  🖼 ФОН — за всем стеком, закрывает промежутки'
+        )
+        scheme_info.setStyleSheet('color:#3a3937; font-size:11px; font-family:monospace;')
+        scheme_lay.addWidget(scheme_info)
+        body_lay.addWidget(scheme_card)
+
+        # ── Слоты видео ──
+        slots_card = QFrame(); slots_card.setObjectName('inner_card')
+        slots_lay = QVBoxLayout(slots_card)
+        slots_lay.setContentsMargins(14, 12, 14, 14); slots_lay.setSpacing(10)
+        slots_lay.addWidget(_lbl('🎬  ВИДЕО СЛОТЫ', 'card_title'))
+        slots_lay.addWidget(_hdiv())
+
+        self.slot_main   = VideoSlot('ГЛАВНЫЙ РОЛИК  —  по центру',  '🎬', required=True)
+        self.slot_banner = VideoSlot('БАННЕР  —  сверху вплотную',   '📢', required=False)
+        self.slot_hold   = VideoSlot('УДЕРЖАНИЕ  —  снизу вплотную', '🎮', required=False)
+        self.slot_bg     = VideoSlot('ФОН  —  задний план',          '🖼', required=False)
+
+        slots_lay.addWidget(self.slot_main)
+        slots_lay.addWidget(self.slot_banner)
+        slots_lay.addWidget(self.slot_hold)
+        slots_lay.addWidget(self.slot_bg)
+        body_lay.addWidget(slots_card)
+
+        # ── Аудио + формат ──
+        af_card = QFrame(); af_card.setObjectName('inner_card')
+        af_lay = QVBoxLayout(af_card)
+        af_lay.setContentsMargins(14, 12, 14, 12); af_lay.setSpacing(8)
+        af_lay.addWidget(_lbl('⚙  НАСТРОЙКИ РЕНДЕРА', 'card_title'))
+        af_lay.addWidget(_hdiv())
+        af_grid = QGridLayout(); af_grid.setSpacing(8)
+        af_grid.setColumnMinimumWidth(0, 140); af_grid.setColumnStretch(1, 1)
+
+        af_grid.addWidget(_lbl('Источник аудио:'), 0, 0)
+        self._audio = _combo(['Главный ролик (центр)', 'Баннер (верх)', 'Удержание (низ)', 'Без звука'])
+        af_grid.addWidget(self._audio, 0, 1)
+
+        af_grid.addWidget(_lbl('Формат вывода:'), 1, 0)
+        self._fmt = _combo(['TikTok  9:16  1080×1920', 'Reels  9:16  1080×1920',
+                            'Shorts  9:16  1080×1920', 'Квадрат  1:1  1080×1080',
+                            'YouTube  16:9  1920×1080', 'Оригинал'])
+        af_grid.addWidget(self._fmt, 1, 1)
+
+        af_grid.addWidget(_lbl('Цвет фона:'), 2, 0)
+        self._bg_color = _combo(['Чёрный', 'Белый', 'Серый'])
+        af_grid.addWidget(self._bg_color, 2, 1)
+
+        af_grid.addWidget(_lbl('Качество:'), 3, 0)
+        self._quality = _combo(['Быстро (fast)', 'Хорошо (medium)', 'Лучшее (slow)'])
+        af_grid.addWidget(self._quality, 3, 1)
+
+        af_lay.addLayout(af_grid)
+        body_lay.addWidget(af_card)
+
+        # ── Нарезка результата ──
+        self.cut = CutSettings('✂  НАРЕЗАТЬ РЕЗУЛЬТАТ ПОСЛЕ РЕНДЕРА')
+        body_lay.addWidget(self.cut)
+
+        # ── Папка вывода ──
+        out_card = QFrame(); out_card.setObjectName('inner_card')
+        out_lay = QVBoxLayout(out_card)
+        out_lay.setContentsMargins(14, 12, 14, 12); out_lay.setSpacing(8)
+        out_lay.addWidget(_lbl('💾  ПАПКА ВЫВОДА', 'card_title'))
+        out_lay.addWidget(_hdiv())
+        out_row = QHBoxLayout(); out_row.setSpacing(6)
+        self._out_edit = QLineEdit(); self._out_edit.setObjectName('field')
+        self._out_edit.setPlaceholderText('processed/composition/  (авто)')
+        out_row.addWidget(self._out_edit)
+        out_btn = QPushButton('Обзор'); out_btn.setObjectName('btn_secondary')
+        out_btn.setFixedWidth(74)
+        out_btn.clicked.connect(self._browse_out)
+        out_row.addWidget(out_btn)
+        out_lay.addLayout(out_row)
+        out_lay.addWidget(_lbl('Оставь пустым — сохранится в processed/composition/', 'hint'))
+        body_lay.addWidget(out_card)
+
+        lay.addWidget(body)
+
+    def _browse_out(self):
+        p = QFileDialog.getExistingDirectory(self, 'Папка вывода')
+        if p: self._out_edit.setText(p)
+
+    def get_output_dir(self) -> str:
+        manual = self._out_edit.text().strip()
+        if manual: return manual
+        return os.path.join(BASE_DIR, 'processed', 'composition')
+
+    def get_render_settings(self) -> dict:
+        fmt_map = {
+            0: {'w': 1080, 'h': 1920, 'key': 'tiktok'},
+            1: {'w': 1080, 'h': 1920, 'key': 'reels'},
+            2: {'w': 1080, 'h': 1920, 'key': 'shorts'},
+            3: {'w': 1080, 'h': 1080, 'key': 'square'},
+            4: {'w': 1920, 'h': 1080, 'key': 'youtube'},
+            5: {'w': 0,    'h': 0,    'key': 'original'},
+        }
+        fmt = fmt_map.get(self._fmt.currentIndex(), fmt_map[0])
+        quality_map = {'Быстро (fast)': 'fast', 'Хорошо (medium)': 'medium', 'Лучшее (slow)': 'slow'}
+        bg_map = {'Чёрный': 'black', 'Белый': 'white', 'Серый': 'gray'}
+        audio_map = ['center', 'top', 'bottom', 'none']
+        return {
+            'output_width':  fmt['w'],
+            'output_height': fmt['h'],
+            'format_key':    fmt['key'],
+            'quality':       quality_map.get(self._quality.currentText(), 'fast'),
+            'bg_color':      bg_map.get(self._bg_color.currentText(), 'black'),
+            'audio_source':  audio_map[self._audio.currentIndex()],
+            'main_path':     self.slot_main.resolve_path(),
+            'top_path':      self.slot_banner.resolve_path(),
+            'bottom_path':   self.slot_hold.resolve_path(),
+            'bg_path':       self.slot_bg.resolve_path(),
+        }
+
+    def is_ready(self) -> bool:
+        return not self.slot_main.is_empty()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# ПАНЕЛЬ ОЧИСТКИ
+# ──────────────────────────────────────────────────────────────────────
+
+class CleanupPanel(QFrame):
+    """Настройки автоматического удаления файлов после обработки."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName('cleanup_card')
+        self._build()
+
+    def _build(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(14, 12, 14, 12)
+        lay.setSpacing(8)
+
+        hdr = QHBoxLayout(); hdr.setSpacing(8)
+        hdr.addWidget(QLabel('🗑')); hdr.addWidget(_lbl('АВТООЧИСТКА', 'cleanup_title'))
+        hdr.addStretch()
+        lay.addLayout(hdr)
+        lay.addWidget(_hdiv())
+        lay.addWidget(_lbl('После завершения нарезки автоматически удалять:', 'hint'))
+
+        self._del_downloaded = QCheckBox('Удалять скачанные видео (downloads/)')
+        self._del_downloaded.setObjectName('chk')
+        self._del_downloaded.setToolTip(
+            'Удалить исходные файлы из папки downloads/ после того, как нарезка завершена'
+        )
+        lay.addWidget(self._del_downloaded)
+
+        self._del_composed = QCheckBox('Удалять видео после композиции (processed/composition/)')
+        self._del_composed.setObjectName('chk')
+        self._del_composed.setToolTip(
+            'Удалить результат рендера композиции после того, как он нарезан на клипы'
+        )
+        lay.addWidget(self._del_composed)
+
+        warn = _lbl('⚠  Удаление необратимо — убедитесь что нарезка прошла успешно', 'hint')
+        warn.setStyleSheet('color:#bb653b; font-size:10px;')
+        lay.addWidget(warn)
+
+    def get_settings(self) -> dict:
+        return {
+            'delete_downloaded': self._del_downloaded.isChecked(),
+            'delete_composed':   self._del_composed.isChecked(),
+        }
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1238,7 +1200,6 @@ class TaskCard(QFrame):
 
     def _build(self, icon, op_name, desc):
         lay = QVBoxLayout(self); lay.setContentsMargins(14, 10, 12, 10); lay.setSpacing(6)
-
         top = QHBoxLayout(); top.setSpacing(8)
         op_lbl = QLabel(f'{icon}  {op_name}'); op_lbl.setObjectName('task_op')
         top.addWidget(op_lbl)
@@ -1250,11 +1211,9 @@ class TaskCard(QFrame):
         self._cancel.setFixedSize(22, 22); self._cancel.clicked.connect(self._on_cancel)
         top.addWidget(self._cancel)
         lay.addLayout(top)
-
         self._bar = QProgressBar(); self._bar.setObjectName('task_bar')
         self._bar.setRange(0, 100); self._bar.setTextVisible(False)
         lay.addWidget(self._bar)
-
         bot = QHBoxLayout()
         self._msg = QLabel('Подготовка...'); self._msg.setObjectName('task_msg')
         bot.addWidget(self._msg, stretch=1)
@@ -1286,12 +1245,23 @@ class TaskCard(QFrame):
         self._cancel.hide(); self._worker = None
 
     def _on_cancel(self):
-        if self._worker and self._worker.isRunning(): self._worker.terminate()
+        if self._worker and self._worker.isRunning():
+            self._worker.terminate()
         self.cancel_requested.emit()
 
 
 # ──────────────────────────────────────────────────────────────────────
-# ГЛАВНАЯ СТРАНИЦА
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ЗАГОЛОВКОВ
+# ──────────────────────────────────────────────────────────────────────
+
+def _make_seg_title(text: str) -> QLabel:
+    lbl = QLabel(text)
+    lbl.setObjectName('seg_title')
+    return lbl
+
+
+# ──────────────────────────────────────────────────────────────────────
+# ГЛАВНАЯ СТРАНИЦА ОБРАБОТКИ
 # ──────────────────────────────────────────────────────────────────────
 
 class ProcessingPage(BasePage):
@@ -1301,226 +1271,254 @@ class ProcessingPage(BasePage):
         self._workers = []
         self._build()
         self.setStyleSheet(PAGE_QSS)
+        self.setObjectName('proc_page')
 
     def _build(self):
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # Левая часть — настройки (скролл)
+        # ── Левая колонка: прокручиваемые настройки ──
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
         left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        left_scroll.setMinimumWidth(420)
-        left_scroll.setMaximumWidth(560)
+        left_scroll.setMinimumWidth(440)
+        # Без MaximumWidth — левая колонка растягивается на всё доступное пространство
 
         left_inner = QWidget(); left_inner.setObjectName('proc_page')
         left_lay = QVBoxLayout(left_inner)
         left_lay.setContentsMargins(16, 16, 16, 16)
-        left_lay.setSpacing(12)
+        left_lay.setSpacing(20)
 
-        # Заголовок
-        hdr = QFrame(); hdr.setObjectName('proc_header')
-        hdr_lay = QVBoxLayout(hdr); hdr_lay.setContentsMargins(0, 0, 0, 10); hdr_lay.setSpacing(2)
-        hdr_lay.addWidget(QLabel('⚙  Обработка видео') if False else self._make_title())
-        left_lay.addWidget(hdr)
+        # Заголовок страницы
+        page_hdr = QFrame()
+        page_hdr.setStyleSheet('background: #1c1b19; border-bottom: 1px solid #2d2c2a; border-radius: 0;')
+        ph_lay = QHBoxLayout(page_hdr); ph_lay.setContentsMargins(4, 8, 4, 12)
+        ph_info = QVBoxLayout(); ph_info.setSpacing(2)
+        title_lbl = QLabel('⚙  Обработка видео')
+        title_lbl.setStyleSheet('color:#cdccca; font-size:15px; font-weight:700;')
+        sub_lbl = QLabel('Нарезка исходников и сборка вертикального стека')
+        sub_lbl.setStyleSheet('color:#5a5957; font-size:11px;')
+        ph_info.addWidget(title_lbl); ph_info.addWidget(sub_lbl)
+        ph_lay.addLayout(ph_info); ph_lay.addStretch()
+        left_lay.addWidget(page_hdr)
 
-        # Панели
-        self.src_panel  = SourcePanel()
-        self.cut_panel  = CutPanel()
-        self.comp_panel = CompositionPanel()
+        # Сегмент 1: Нарезка
+        self.seg_cut = SegmentCut()
+        left_lay.addWidget(self.seg_cut)
 
-        # Слот центра (главное видео) — в compositionPanel, но показываем отдельно для наглядности
-        self._center_slot = VideoSlot('center')
-        center_card, center_lay = _section_card('🎬  ГЛАВНОЕ ВИДЕО (центр)')
-        center_lay.addWidget(self._center_slot)
+        # Сегмент 2: Композиция
+        self.seg_compose = SegmentCompose()
+        left_lay.addWidget(self.seg_compose)
 
-        self.sub_panel  = SubtitlePanel()
-        self.fmt_panel  = FormatPanel()
-        self.out_panel  = OutputPanel()
+        # Автоочистка
+        self.cleanup = CleanupPanel()
+        left_lay.addWidget(self.cleanup)
 
-        for w in [self.src_panel, self.cut_panel, center_card,
-                  self.comp_panel, self.sub_panel, self.fmt_panel, self.out_panel]:
-            left_lay.addWidget(w)
+        # Кнопки запуска
+        btn_card = QFrame(); btn_card.setObjectName('inner_card')
+        btn_lay = QVBoxLayout(btn_card)
+        btn_lay.setContentsMargins(14, 12, 14, 14); btn_lay.setSpacing(8)
 
-        # Ошибка + кнопка запуска
-        self._err_lbl = _lbl('', 'err'); left_lay.addWidget(self._err_lbl)
+        self._btn_cut = QPushButton('✂  Запустить нарезку  (Сегмент 1)')
+        self._btn_cut.setObjectName('btn_start')
+        self._btn_cut.clicked.connect(self._run_cut)
+        btn_lay.addWidget(self._btn_cut)
 
-        self._start_btn = QPushButton('▶  ЗАПУСТИТЬ ОБРАБОТКУ')
-        self._start_btn.setObjectName('btn_start')
-        self._start_btn.setToolTip('Применить все выбранные настройки к видео')
-        self._start_btn.clicked.connect(self._start)
-        left_lay.addWidget(self._start_btn)
+        self._btn_compose = QPushButton('🎞  Запустить композицию  (Сегмент 2)')
+        self._btn_compose.setObjectName('btn_start')
+        self._btn_compose.setStyleSheet(
+            'QPushButton#btn_start{background:#437a22;}'
+            'QPushButton#btn_start:hover{background:#2e5c10;}'
+            'QPushButton#btn_start:disabled{background:#2d2c2a;color:#5a5957;}'
+        )
+        self._btn_compose.clicked.connect(self._run_compose)
+        btn_lay.addWidget(self._btn_compose)
+
+        left_lay.addWidget(btn_card)
         left_lay.addStretch()
 
         left_scroll.setWidget(left_inner)
-        root.addWidget(left_scroll)
+        root.addWidget(left_scroll, stretch=1)  # занимает всё доступное место
 
-        # Правая часть — задачи
+        # ── Правая колонка: активные задачи ──
         right = QFrame(); right.setObjectName('tasks_panel')
-        right_lay = QVBoxLayout(right); right_lay.setContentsMargins(16, 16, 16, 16); right_lay.setSpacing(10)
+        right.setFixedWidth(300)
+        right_lay = QVBoxLayout(right)
+        right_lay.setContentsMargins(12, 16, 12, 16)
+        right_lay.setSpacing(10)
 
-        tasks_hdr = QHBoxLayout()
-        t = QLabel('ЗАДАЧИ'); t.setObjectName('tasks_title'); tasks_hdr.addWidget(t)
-        tasks_hdr.addStretch()
-        clr = QPushButton('Очистить'); clr.setObjectName('btn_secondary')
-        clr.setFixedHeight(26); clr.clicked.connect(self._clear_tasks)
-        tasks_hdr.addWidget(clr)
-        right_lay.addLayout(tasks_hdr)
+        tasks_hdr = QLabel('ЗАДАЧИ'); tasks_hdr.setObjectName('tasks_title')
+        right_lay.addWidget(tasks_hdr)
+        right_lay.addWidget(_hdiv())
 
-        tasks_scroll = QScrollArea(); tasks_scroll.setWidgetResizable(True)
-        self._tasks_inner = QWidget(); self._tasks_inner.setObjectName('proc_page')
+        self._tasks_scroll = QScrollArea()
+        self._tasks_scroll.setWidgetResizable(True)
+        self._tasks_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._tasks_inner = QWidget()
         self._tasks_lay = QVBoxLayout(self._tasks_inner)
-        self._tasks_lay.setContentsMargins(0, 0, 0, 0); self._tasks_lay.setSpacing(8)
+        self._tasks_lay.setContentsMargins(0, 0, 0, 0)
+        self._tasks_lay.setSpacing(8)
         self._tasks_lay.addStretch()
-        tasks_scroll.setWidget(self._tasks_inner)
-        right_lay.addWidget(tasks_scroll)
+        self._tasks_scroll.setWidget(self._tasks_inner)
+        right_lay.addWidget(self._tasks_scroll, stretch=1)  # растягивается по высоте
 
-        self._no_tasks = QLabel('Нет активных задач'); self._no_tasks.setObjectName('no_tasks')
-        self._no_tasks.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        right_lay.addWidget(self._no_tasks)
+        self._no_tasks_lbl = QLabel('Нет активных задач')
+        self._no_tasks_lbl.setObjectName('no_tasks')
+        self._no_tasks_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        right_lay.addWidget(self._no_tasks_lbl)
 
-        root.addWidget(right, stretch=1)
+        root.addWidget(right)
 
-    def _make_title(self):
-        w = QWidget()
-        lay = QVBoxLayout(w); lay.setContentsMargins(0, 8, 0, 8); lay.setSpacing(2)
-        t = QLabel('Обработка видео'); t.setObjectName('page_title')
-        s = QLabel('Нарезка · Композиция · Субтитры · Форматы'); s.setObjectName('page_sub')
-        lay.addWidget(t); lay.addWidget(s)
-        return w
+    # ── Запуск нарезки ─────────────────────────────────────────────
 
-    def _start(self):
-        self._err_lbl.setText('')
-
-        paths = self.src_panel.get_paths()
-        if not paths:
-            self._err_lbl.setText('⚠ Выберите исходное видео')
+    def _run_cut(self):
+        if self.seg_cut.source.is_empty():
+            self._show_error('Выберите видео в Сегменте 1 (Источник видео)')
+            return
+        if not self.seg_cut.cut.is_enabled():
+            self._show_error('Включите нарезку в Сегменте 1')
             return
 
-        center_path = self._center_slot.resolve_path()
-        ch_id, ch_name = self.src_panel.get_channel_info()
+        paths = self.seg_cut.source.get_paths()
+        cut_cfg = self.seg_cut.cut.get_settings()
+        cleanup = self.cleanup.get_settings()
 
-        cut_settings  = self.cut_panel.get_settings()   if self.cut_panel.is_enabled()  else None
-        comp_settings = self.comp_panel.get_settings()  if self.comp_panel.is_enabled() else None
-        sub_settings  = self.sub_panel.get_settings()   if self.sub_panel.is_enabled()  else None
-        fmt_settings  = self.fmt_panel.get_settings()
-
-        for video_path in paths:
-            video_title = self.src_panel.get_video_title(video_path)
-            out_dir = self.out_panel.get_output_dir(ch_name, video_title)
+        for path in paths:
+            title = os.path.splitext(os.path.basename(path))[0]
+            out_dir = self.seg_cut.get_output_dir(title)
             os.makedirs(out_dir, exist_ok=True)
+            prefix = self.seg_cut.cut.get_prefix(title)
 
-            # ── НАРЕЗКА ──
-            if cut_settings:
-                prefix = self.cut_panel.get_prefix(video_title)
-                worker = ProcessWorker(
-                    'cut',
-                    input_path=video_path,
-                    output_dir=out_dir,
-                    clip_duration=cut_settings['duration'],
-                    clip_count=cut_settings.get('clip_count', 0),
-                    prefix=prefix,
-                    reencode=cut_settings['reencode'],
-                )
-                worker.start()
-                self._add_task(worker, '✂', 'Нарезка', os.path.basename(video_path))
+            # ProcessWorker(operation, **kwargs) — operation первым аргументом
+            # cut_video принимает: input_path, output_dir, clip_duration, clip_count, prefix, reencode
+            clip_duration = cut_cfg.get('duration', 60)
+            clip_count    = cut_cfg.get('clip_count', 0) if cut_cfg.get('by_count') else 0
 
-            # ── КОМПОЗИЦИЯ / СТЕКИНГ ──
-            if comp_settings:
-                stack_center = center_path or video_path
-                if not stack_center:
-                    self._err_lbl.setText('⚠ Укажи главное видео в слоте ЦЕНТР')
-                    continue
+            worker = ProcessWorker(
+                'cut',
+                input_path    = path,
+                output_dir    = out_dir,
+                prefix        = prefix,
+                clip_duration = clip_duration,
+                clip_count    = clip_count,
+                reencode      = cut_cfg.get('reencode', False),
+            )
+            card = TaskCard('✂', 'Нарезка', os.path.basename(path))
+            card.attach(worker)
+            card.cancel_requested.connect(lambda c=card: self._remove_task(c))
+            self._add_task(card)
+            self._workers.append(worker)
+            worker.start()
 
-                out_file = os.path.join(out_dir, f'composed_{_sanitize(video_title)}.mp4')
-                cut_after = comp_settings.get('cut_after', False)
+            # Автоочистка после завершения
+            if cleanup.get('delete_downloaded'):
+                worker.finished.connect(lambda _, p=path: self._safe_delete(p))
 
-                stack_kwargs = dict(
-                    center_path   = stack_center,
-                    output_path   = out_file,
-                    top_path      = comp_settings.get('top_path'),
-                    bottom_path   = comp_settings.get('bottom_path'),
-                    output_width  = fmt_settings['output_width'],
-                    output_height = fmt_settings['output_height'],
-                    top_h         = fmt_settings['top_h'],
-                    center_h      = fmt_settings['center_h'],
-                    bottom_h      = fmt_settings['bottom_h'],
-                    audio_source  = comp_settings.get('audio_source', 'center'),
-                    bg_color      = fmt_settings['bg_color'],
-                    quality       = fmt_settings['quality'],
-                )
-                if sub_settings and sub_settings.get('subtitle_path'):
-                    stack_kwargs.update(
-                        subtitle_path  = sub_settings['subtitle_path'],
-                        subtitle_size  = sub_settings['subtitle_size'],
-                        subtitle_color = sub_settings['subtitle_color'],
-                    )
+    # ── Запуск композиции ──────────────────────────────────────────
 
-                # Если нужна нарезка после — используем stack_and_cut
-                if cut_after:
-                    # Используем встроенные настройки нарезки из панели Композиции
-                    _cut_dur = comp_settings.get('cut_duration', 60)
-                    _cut_cnt = comp_settings.get('cut_clip_count', 0)
-                    _cut_re  = comp_settings.get('cut_reencode', False)
-                    stack_kwargs.update(
-                        cut_duration   = _cut_dur,
-                        cut_count      = _cut_cnt,
-                        cut_prefix     = _sanitize(video_title) or 'clip',
-                        cut_reencode   = _cut_re,
-                        cut_output_dir = os.path.join(out_dir, 'clips'),
-                    )
-                    op = 'stack_and_cut'
-                    icon, label = '🎞✂', 'Композиция + Нарезка'
-                else:
-                    op = 'stack'
-                    icon, label = '🎞', 'Композиция'
+    def _run_compose(self):
+        if self.seg_compose.slot_main.is_empty():
+            self._show_error('Выберите главный ролик в Сегменте 2 (Главный ролик — центр)')
+            return
 
-                worker = ProcessWorker(op, **stack_kwargs)
-                worker.start()
-                self._add_task(worker, icon, label, os.path.basename(video_path))
+        render  = self.seg_compose.get_render_settings()
+        cut_cfg = self.seg_compose.cut.get_settings()
+        cleanup = self.cleanup.get_settings()
+        out_dir = self.seg_compose.get_output_dir()
+        os.makedirs(out_dir, exist_ok=True)
 
-        self._no_tasks.hide()
+        main_path = render['main_path']
+        if not main_path:
+            self._show_error('Не удалось определить путь к главному ролику')
+            return
 
-    def _add_task(self, worker, icon, op, desc):
-        card = TaskCard(icon, op, desc)
+        main_name = os.path.splitext(os.path.basename(main_path))[0]
+        prefix    = self.seg_compose.cut.get_prefix(main_name)
+
+        # stack_output_path — путь к результату стекинга
+        stack_out = os.path.join(out_dir, f'{_sanitize(main_name)}_composed.mp4')
+
+        # Новый stack_videos сам читает размеры видео — не нужно передавать top_h/center_h/bottom_h
+        # output_width/output_height — размер итогового холста (экрана)
+        out_w = render.get('output_width', 1080)
+        out_h = render.get('output_height', 1920)
+        # Для 'original' берём размеры самого главного видео
+        if render.get('format_key') == 'original' or (out_w == 0 and out_h == 0):
+            try:
+                ci = VideoService().get_video_info(main_path)
+                out_w = ci.width  or 1080
+                out_h = ci.height or 1920
+            except Exception:
+                out_w, out_h = 1080, 1920
+
+        if cut_cfg.get('enabled'):
+            clip_duration = cut_cfg.get('duration', 60)
+            clip_count    = cut_cfg.get('clip_count', 0) if cut_cfg.get('by_count') else 0
+            worker = ProcessWorker(
+                'stack_and_cut',
+                center_path    = main_path,
+                output_path    = stack_out,
+                top_path       = render.get('top_path'),
+                bottom_path    = render.get('bottom_path'),
+                bg_path        = render.get('bg_path'),
+                output_width   = out_w,
+                output_height  = out_h,
+                audio_source   = render.get('audio_source', 'center'),
+                bg_color       = render.get('bg_color', 'black'),
+                quality        = render.get('quality', 'fast'),
+                cut_duration   = clip_duration,
+                cut_count      = clip_count,
+                cut_prefix     = prefix,
+                cut_reencode   = cut_cfg.get('reencode', False),
+                cut_output_dir = out_dir,
+            )
+        else:
+            worker = ProcessWorker(
+                'stack',
+                center_path   = main_path,
+                output_path   = stack_out,
+                top_path      = render.get('top_path'),
+                bottom_path   = render.get('bottom_path'),
+                bg_path       = render.get('bg_path'),
+                output_width  = out_w,
+                output_height = out_h,
+                audio_source  = render.get('audio_source', 'center'),
+                bg_color      = render.get('bg_color', 'black'),
+                quality       = render.get('quality', 'fast'),
+            )
+
+        card = TaskCard('🎞', 'Композиция', main_name)
         card.attach(worker)
-        card.cancel_requested.connect(lambda: self._remove_task(card))
+        card.cancel_requested.connect(lambda c=card: self._remove_task(c))
+        self._add_task(card)
         self._workers.append(worker)
-        # Вставляем перед stretch
-        count = self._tasks_lay.count()
-        self._tasks_lay.insertWidget(count - 1, card)
+        worker.start()
 
-    def _remove_task(self, card):
-        self._tasks_lay.removeWidget(card)
+        # Автоочистка скомпонованного файла после нарезки
+        if cleanup.get('delete_composed') and cut_cfg.get('enabled'):
+            worker.finished.connect(lambda _, p=stack_out: self._safe_delete(p))
+
+    # ── Управление карточками задач ────────────────────────────────
+
+    def _add_task(self, card: TaskCard):
+        self._no_tasks_lbl.hide()
+        self._tasks_lay.insertWidget(self._tasks_lay.count() - 1, card)
+
+    def _remove_task(self, card: TaskCard):
+        card.setParent(None)
         card.deleteLater()
         if self._tasks_lay.count() <= 1:
-            self._no_tasks.show()
+            self._no_tasks_lbl.show()
 
-
-    def apply_preset(self, data: dict):
-        """Применяет пресет настроек к странице обработки."""
+    def _safe_delete(self, path: str):
+        """Безопасно удаляет файл если он существует."""
         try:
-            if data.get('clip_enabled'):
-                self.cut_panel._enabled.setChecked(True)
-                if data.get('clip_duration'):
-                    self.cut_panel._duration.setValue(int(data['clip_duration']))
-            if data.get('stack_enabled'):
-                self.comp_panel._enabled.setChecked(True)
-                if data.get('top_folder'):
-                    self.comp_panel.slot_top.set_path(data['top_folder'])
-                if data.get('bottom_folder'):
-                    self.comp_panel.slot_bottom.set_path(data['bottom_folder'])
-            if data.get('output_format'):
-                fmt = data['output_format']
-                if fmt in self.fmt_panel._fmt_btns:
-                    self.fmt_panel._fmt_btns[fmt].setChecked(True)
-                    self.fmt_panel._select(fmt)
+            if path and os.path.isfile(path):
+                os.remove(path)
         except Exception:
             pass
-    def _clear_tasks(self):
-        while self._tasks_lay.count() > 1:
-            item = self._tasks_lay.takeAt(0)
-            if item.widget(): item.widget().deleteLater()
-        self._no_tasks.show()
-        self._workers.clear()
+
+    def _show_error(self, msg: str):
+        from PyQt6.QtWidgets import QMessageBox
+        QMessageBox.warning(self, 'Ошибка', msg)
