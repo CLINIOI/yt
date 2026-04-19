@@ -86,7 +86,9 @@ class Database:
                 last_checked    TIMESTAMP,
                 added_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 enabled         INTEGER DEFAULT 1,
-                auto_download   INTEGER DEFAULT 0
+                auto_download   INTEGER DEFAULT 0,
+                tiktok_handle   TEXT,
+                tiktok_url      TEXT
             )
         """)
 
@@ -147,6 +149,18 @@ class Database:
         except Exception:
             pass  # колонка уже существует
 
+        # Миграция: TikTok поля для каналов
+        try:
+            cur.execute("ALTER TABLE channels ADD COLUMN tiktok_handle TEXT")
+            self._commit()
+        except Exception:
+            pass
+        try:
+            cur.execute("ALTER TABLE channels ADD COLUMN tiktok_url TEXT")
+            self._commit()
+        except Exception:
+            pass
+
         # Очередь загрузок
         cur.execute("""
             CREATE TABLE IF NOT EXISTS download_queue (
@@ -178,7 +192,9 @@ class Database:
 
     def add_channel(self, url: str, title: str = None,
                     yt_channel_id: str = None,
-                    thumbnail_url: str = None) -> int:
+                    thumbnail_url: str = None,
+                    tiktok_handle: str = None,
+                    tiktok_url: str = None) -> int:
         """
         Добавляет новый канал. Возвращает id новой записи.
         Если канал с таким url уже есть — возвращает его id.
@@ -186,9 +202,9 @@ class Database:
         cur = self.conn.cursor()
         try:
             cur.execute("""
-                INSERT INTO channels (url, title, yt_channel_id, thumbnail_url)
-                VALUES (?, ?, ?, ?)
-            """, (url, title, yt_channel_id, thumbnail_url))
+                INSERT INTO channels (url, title, yt_channel_id, thumbnail_url, tiktok_handle, tiktok_url)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (url, title, yt_channel_id, thumbnail_url, tiktok_handle, tiktok_url))
             self._commit()
             return cur.lastrowid
         except sqlite3.IntegrityError:
@@ -222,7 +238,8 @@ class Database:
         if not kwargs:
             return False
         allowed = {"title", "yt_channel_id", "thumbnail_url", "description",
-                   "video_count", "last_checked", "enabled", "auto_download"}
+                   "video_count", "last_checked", "enabled", "auto_download",
+                   "tiktok_handle", "tiktok_url"}
         fields = {k: v for k, v in kwargs.items() if k in allowed}
         if not fields:
             return False

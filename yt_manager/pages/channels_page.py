@@ -10,6 +10,7 @@ import os
 import re
 import json
 import logging
+import webbrowser
 from typing import Optional
 
 from PyQt6.QtWidgets import (
@@ -144,6 +145,10 @@ QLabel#card_sub {
     color: #5a5957;
     font-size: 11px;
 }
+QLabel#card_tiktok {
+    color: #5a5957;
+    font-size: 10px;
+}
 QLabel#card_badge {
     background: #4f98a3;
     color: #0a1e20;
@@ -205,6 +210,18 @@ QLineEdit#url_input {
     padding: 9px 12px;
 }
 QLineEdit#url_input:focus { border-color: #4f98a3; }
+
+/* ── Кнопка просмотра видео ── */
+QPushButton#btn_watch {
+    background: #253535;
+    color: #4f98a3;
+    border: 1px solid #393836;
+    border-radius: 5px;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 8px;
+}
+QPushButton#btn_watch:hover { background: #4f98a3; color: #0a1e20; }
 
 /* ── Пустое состояние ── */
 QLabel#empty_icon  { color: #3a3937; font-size: 40px; }
@@ -297,11 +314,16 @@ class FetchChannelWorker(QThread):
     error_occurred = pyqtSignal(str)      # сообщение об ошибке
 
     def __init__(self, url: str, channel_id: Optional[int] = None,
-                 video_limit: int = 0, parent=None):  # 0 = все видео
+                 video_limit: int = 0,
+                 tiktok_handle: str = None,
+                 tiktok_url: str = None,
+                 parent=None):  # 0 = все видео
         super().__init__(parent)
-        self.url        = yt_service.normalize_channel_url(url)
-        self.channel_id = channel_id   # None → новый канал
-        self.video_limit = video_limit
+        self.url           = yt_service.normalize_channel_url(url)
+        self.channel_id    = channel_id   # None → новый канал
+        self.video_limit   = video_limit
+        self.tiktok_handle = tiktok_handle
+        self.tiktok_url    = tiktok_url
 
     def run(self):
         # ── 1. Информация о канале ──
@@ -318,14 +340,20 @@ class FetchChannelWorker(QThread):
                 title=ch_info.title,
                 yt_channel_id=ch_info.yt_channel_id,
                 thumbnail_url=ch_info.thumbnail_url,
+                tiktok_handle=self.tiktok_handle,
+                tiktok_url=self.tiktok_url,
             )
         else:
-            db.update_channel(
-                self.channel_id,
+            _upd = dict(
                 title=ch_info.title,
                 yt_channel_id=ch_info.yt_channel_id,
                 thumbnail_url=ch_info.thumbnail_url,
             )
+            if self.tiktok_handle is not None:
+                _upd["tiktok_handle"] = self.tiktok_handle
+            if self.tiktok_url is not None:
+                _upd["tiktok_url"] = self.tiktok_url
+            db.update_channel(self.channel_id, **_upd)
 
         # ── 3. Список видео ──
         limit_info = f" (до {self.video_limit})" if self.video_limit > 0 else " (все видео)"
@@ -390,6 +418,30 @@ class AddChannelDialog(QDialog):
         self.url_input.setPlaceholderText("https://youtube.com/@channel  или  @channel")
         self.url_input.returnPressed.connect(self._on_add)
         lay.addWidget(self.url_input)
+        lay.addSpacing(14)
+
+        hint_tt = QLabel("TikTok аккаунт (обязательно)")
+        hint_tt.setObjectName("dlg_hint")
+        lay.addWidget(hint_tt)
+        lay.addSpacing(6)
+
+        self.tiktok_handle_input = QLineEdit()
+        self.tiktok_handle_input.setObjectName("url_input")
+        self.tiktok_handle_input.setPlaceholderText("@username")
+        self.tiktok_handle_input.returnPressed.connect(self._on_add)
+        lay.addWidget(self.tiktok_handle_input)
+        lay.addSpacing(14)
+
+        hint_tt_url = QLabel("Ссылка на TikTok канал (по желанию)")
+        hint_tt_url.setObjectName("dlg_hint")
+        lay.addWidget(hint_tt_url)
+        lay.addSpacing(6)
+
+        self.tiktok_url_input = QLineEdit()
+        self.tiktok_url_input.setObjectName("url_input")
+        self.tiktok_url_input.setPlaceholderText("https://tiktok.com/@username")
+        self.tiktok_url_input.returnPressed.connect(self._on_add)
+        lay.addWidget(self.tiktok_url_input)
         lay.addSpacing(10)
 
         self.status_lbl = QLabel("")
@@ -420,10 +472,13 @@ class AddChannelDialog(QDialog):
             self._show_status("Введите URL канала", error=True)
             return
 
+        tiktok_handle = self.tiktok_handle_input.text().strip() or None
+        tiktok_url    = self.tiktok_url_input.text().strip() or None
+
         self._set_loading(True)
         self._show_status("Подключение к YouTube…")
 
-        self._worker = FetchChannelWorker(url)
+        self._worker = FetchChannelWorker(url, tiktok_handle=tiktok_handle, tiktok_url=tiktok_url)
         self._worker.status_msg.connect(lambda m: self._show_status(m))
         self._worker.finished.connect(self._on_fetch_done)
         self._worker.error_occurred.connect(self._on_fetch_error)
@@ -495,6 +550,17 @@ class ChannelCard(QFrame):
             title_lbl.text(), Qt.TextElideMode.ElideRight, 130
         ))
         info.addWidget(title_lbl)
+
+        tiktok_handle = ch.get("tiktok_handle") or ""
+        if tiktok_handle:
+            tt_str = tiktok_handle if tiktok_handle.startswith("@") else f"@{tiktok_handle}"
+            tt_lbl = QLabel(tt_str)
+            tt_lbl.setObjectName("card_tiktok")
+            tt_lbl.setMaximumWidth(130)
+            tt_lbl.setText(tt_lbl.fontMetrics().elidedText(
+                tt_lbl.text(), Qt.TextElideMode.ElideRight, 130
+            ))
+            info.addWidget(tt_lbl)
 
         new_count = db.get_new_videos_count(self.channel_id)
         sub_text = f"{ch.get('video_count', 0)} видео"
@@ -673,6 +739,8 @@ class ChannelsPage(QWidget):
 
         self._ch_url_lbl = QLabel("")
         self._ch_url_lbl.setObjectName("ch_url")
+        self._ch_url_lbl.setTextFormat(Qt.TextFormat.RichText)
+        self._ch_url_lbl.setOpenExternalLinks(True)
         info.addWidget(self._ch_url_lbl)
 
         self._ch_stats_lbl = QLabel("")
@@ -701,10 +769,10 @@ class ChannelsPage(QWidget):
 
     def _build_video_table(self) -> QTableWidget:
         table = QTableWidget()
-        # Колонки: 0=☐  1=НАЗВАНИЕ  2=ДЛИНА  3=ПРОСМОТРЫ  4=ДАТА  5=СТАТУС
-        table.setColumnCount(6)
+        # Колонки: 0=☐  1=НАЗВАНИЕ  2=ДЛИНА  3=ПРОСМОТРЫ  4=ДАТА  5=СТАТУС  6=▶
+        table.setColumnCount(7)
         table.setHorizontalHeaderLabels(
-            ["☐", "НАЗВАНИЕ", "ДЛИНА", "ПРОСМОТРЫ", "ДАТА", "СТАТУС"])
+            ["☐", "НАЗВАНИЕ", "ДЛИНА", "ПРОСМОТРЫ", "ДАТА", "СТАТУС", "▶"])
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.setShowGrid(False)
@@ -725,12 +793,14 @@ class ChannelsPage(QWidget):
         hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
         hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
         hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
+        hdr.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
 
         table.setColumnWidth(0, 36)
         table.setColumnWidth(2, 68)
         table.setColumnWidth(3, 88)
         table.setColumnWidth(4, 96)
         table.setColumnWidth(5, 108)
+        table.setColumnWidth(6, 86)
         table.verticalHeader().setDefaultSectionSize(36)
 
         return table
@@ -821,7 +891,22 @@ class ChannelsPage(QWidget):
 
         # Обновляем шапку
         self._ch_title_lbl.setText(ch.get("title") or "—")
-        self._ch_url_lbl.setText(ch.get("url", ""))
+
+        yt_url     = ch.get("url", "")
+        tt_handle  = ch.get("tiktok_handle") or ""
+        tt_url     = ch.get("tiktok_url") or ""
+        if not tt_handle.startswith("@") and tt_handle:
+            tt_handle = f"@{tt_handle}"
+
+        yt_link = f'<a href="{yt_url}" style="color:#4f98a3; text-decoration:none;">{yt_url}</a>'
+        if tt_handle and tt_url:
+            tt_link = f'<a href="{tt_url}" style="color:#ff6b6b; text-decoration:none;">{tt_handle}</a>'
+            combined = f'{yt_link} <span style="color:#393836;"> / </span> {tt_link}'
+        elif tt_handle:
+            combined = f'{yt_link} <span style="color:#393836;"> / </span> <span style="color:#ff6b6b;">{tt_handle}</span>'
+        else:
+            combined = yt_link
+        self._ch_url_lbl.setText(combined)
 
         stats = db.get_channel_stats(channel_id)
         by_s  = stats.get("by_status", {})
@@ -888,6 +973,17 @@ class ChannelsPage(QWidget):
             status_item.setForeground(QColor(STATUS_COLOR.get(status, "#797876")))
             status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             table.setItem(row, 5, status_item)
+
+            # 6 — Кнопка "▶ Видео" → открывает YouTube в браузере
+            yt_id = v.get("yt_id", "")
+            if yt_id:
+                watch_btn = QPushButton("▶ Видео")
+                watch_btn.setObjectName("btn_watch")
+                watch_url = f"https://www.youtube.com/watch?v={yt_id}"
+                watch_btn.clicked.connect(
+                    lambda _checked, u=watch_url: webbrowser.open(u)
+                )
+                table.setCellWidget(row, 6, watch_btn)
 
         # Включаем сортировку и применяем текущий индикатор
         table.setSortingEnabled(True)
