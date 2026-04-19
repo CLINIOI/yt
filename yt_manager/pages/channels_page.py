@@ -23,6 +23,7 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer
 from PyQt6.QtGui import QColor, QFont
 
 from db import db
+from pages.video_library_dialog import VideoLibraryDialog
 from youtube_service import yt_service, DownloadWorker, DownloadProgress
 from download_queue import queue_manager, DownloadQueuePanel
 
@@ -241,6 +242,13 @@ QScrollBar::handle:vertical {
     min-height: 30px;
 }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+
+QPushButton#lib_btn {
+    background:#1e2e2f; color:#4f98a3;
+    border:1px solid #2e4446; border-radius:8px;
+    padding:6px 14px; font-size:12px; font-weight:700;
+}
+QPushButton#lib_btn:hover { background:#4f98a3; color:#0a1e20; border-color:#4f98a3; }
 """
 
 
@@ -664,6 +672,12 @@ class ChannelsPage(QWidget):
         add_btn.clicked.connect(self._open_add_dialog)
         lay.addWidget(add_btn)
 
+        lay.addSpacing(4)
+        lib_btn = QPushButton('📋  Библиотека видео')
+        lib_btn.setObjectName('lib_btn')
+        lib_btn.clicked.connect(self._open_library)
+        lay.addWidget(lib_btn)
+
         return bar
 
     def _build_left_panel(self) -> QFrame:
@@ -840,6 +854,11 @@ class ChannelsPage(QWidget):
     # Загрузка каналов из БД
     # ─────────────────────────────────────────────────
 
+
+    def _open_library(self):
+        dlg = VideoLibraryDialog(self, filter_channel_id=self._selected_channel_id)
+        dlg.exec()
+
     def _load_channels(self):
         """Очищает и перестраивает список каналов из БД."""
         # Удаляем старые карточки
@@ -910,10 +929,14 @@ class ChannelsPage(QWidget):
 
         stats = db.get_channel_stats(channel_id)
         by_s  = stats.get("by_status", {})
+        downloaded_count = (
+            by_s.get('downloaded', 0) +
+            by_s.get('processed', 0)
+        )
         self._ch_stats_lbl.setText(
             f"Всего: {stats['total_videos']}  ·  "
             f"Новых: {by_s.get('new', 0)}  ·  "
-            f"Скачано: {by_s.get('downloaded', 0)}"
+            f"Скачано: {downloaded_count}"
         )
 
         self._load_videos(channel_id)

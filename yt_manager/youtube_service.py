@@ -107,12 +107,12 @@ class YouTubeService:
     """
 
     QUALITY_FORMATS: dict[str, str] = {
-        "best":  "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-        "1080p": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best",
-        "720p":  "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best",
-        "480p":  "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best",
-        "360p":  "bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]/best",
-        "audio": "bestaudio[ext=m4a]/bestaudio/best",
+        "best":  "bestvideo*+bestaudio*/best",
+        "1080p": "bestvideo*[height<=1080]+bestaudio*/best[height<=1080]/best",
+        "720p":  "bestvideo*[height<=720]+bestaudio*/best[height<=720]/best",
+        "480p":  "bestvideo*[height<=480]+bestaudio*/best[height<=480]/best",
+        "360p":  "bestvideo*[height<=360]+bestaudio*/best[height<=360]/best",
+        "audio": "bestaudio*/best",
     }
 
     # Файл cookies.txt рядом с проектом (если есть — используется автоматически)
@@ -435,18 +435,17 @@ class YouTubeService:
                     downloaded_path.append(filepath)
 
         opts: dict = {
-            "format":   fmt,
-            "outtmpl":  os.path.join(output_dir, filename_template),
+            "format":             fmt,
+            "format_sort":        ["res", "ext:mp4:m4a", "codec:avc:m4a"],
+            "outtmpl":            os.path.join(output_dir, filename_template),
             "merge_output_format": "mp4",
-            "quiet":    True,
-            "no_warnings": True,
-            "noprogress": True,
-            "progress_hooks":       [_progress_hook],
-            "postprocessor_hooks":  [_postprocessor_hook],
-            # Встраиваем превью в mp4
-            "writethumbnail": False,
-            # Не перескачиваем уже скачанное
-            "nooverwrites": True,
+            "quiet":              True,
+            "no_warnings":        True,
+            "noprogress":         True,
+            "progress_hooks":     [_progress_hook],
+            "postprocessor_hooks": [_postprocessor_hook],
+            "writethumbnail":     False,
+            "nooverwrites":       True,
             **self._cookie_opts(),
         }
 

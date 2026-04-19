@@ -40,6 +40,7 @@ class Database:
             try:
                 self.conn = sqlite3.connect(
                     self.db_path,
+                    isolation_level=None,
                     check_same_thread=False,
                     timeout=_timeout / 1000,
                 )
