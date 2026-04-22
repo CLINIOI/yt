@@ -81,6 +81,23 @@ def _next_free_slot(schedule, busy: set) -> str | None:
     return _next_free_slot_weekday(schedule, busy)
 
 
+def _format_published_dt(raw: str | None) -> str:
+    """Преобразует строку даты в формат 'DD.MM.YYYY HH:MM'."""
+    if not raw:
+        return "—"
+    s = str(raw).strip()
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f"):
+        try:
+            return datetime.strptime(s, fmt).strftime("%d.%m.%Y %H:%M")
+        except Exception:
+            pass
+    try:
+        return datetime.fromisoformat(s).strftime("%d.%m.%Y %H:%M")
+    except Exception:
+        return s
+
+
 class AddTikTokDialog(QDialog):
     """Модалка создания нового TikTok-канала."""
 
@@ -222,9 +239,12 @@ class TikTokPage(BasePage):
         self.lbl_stat_clips_ready = QLabel("Готовых клипов: —")
         self.lbl_stat_clips_total = QLabel("Всего клипов: —")
         self.lbl_stat_published = QLabel("Опубликовано: —")
+        self.lbl_stat_schedule = QLabel("Слотов в неделю: —")
+        self.lbl_stat_max_week = QLabel("Макс. публикаций в неделю: —")
         for l in (self.lbl_stat_yt, self.lbl_stat_videos,
                   self.lbl_stat_clips_ready, self.lbl_stat_clips_total,
-                  self.lbl_stat_published):
+                  self.lbl_stat_published,
+                  self.lbl_stat_schedule, self.lbl_stat_max_week):
             lay.addWidget(l)
 
         lay.addSpacing(8)
@@ -395,6 +415,12 @@ class TikTokPage(BasePage):
         self.lbl_stat_clips_ready.setText(f"Готовых клипов: {clips_ready}")
         self.lbl_stat_clips_total.setText(f"Всего клипов: {len(clips)}")
         self.lbl_stat_published.setText(f"Опубликовано: {len(scripts_done)}")
+        sched_dict = _normalize_schedule(ch.get("schedule"))
+        slots_per_week = sum(len(sched_dict[k]) for k in WEEKDAYS)
+        self.lbl_stat_schedule.setText(f"Слотов в неделю: {slots_per_week}")
+        self.lbl_stat_max_week.setText(
+            f"Макс. публикаций в неделю: {slots_per_week}"
+        )
 
         # Теги
         self._suppress_autosave = True
@@ -413,13 +439,18 @@ class TikTokPage(BasePage):
             for t in sorted({x for x in sched.get(key, []) if _TIME_SLOT_RE.match(x)}):
                 lst.addItem(t)
 
-        # Опубликованное
+        # Опубликованное (сортировка от новых к старым)
+        def _pub_key(s):
+            return s.get("scheduled_at") or s.get("created_at") or ""
+        done_sorted = sorted(scripts_done, key=_pub_key, reverse=True)
         self.tbl_published.setRowCount(0)
-        for s in scripts_done:
+        for s in done_sorted:
             r = self.tbl_published.rowCount()
             self.tbl_published.insertRow(r)
             self.tbl_published.setItem(r, 0, QTableWidgetItem(s.get("title") or "—"))
-            self.tbl_published.setItem(r, 1, QTableWidgetItem(s.get("scheduled_at") or ""))
+            self.tbl_published.setItem(
+                r, 1, QTableWidgetItem(_format_published_dt(_pub_key(s)))
+            )
             self.tbl_published.setItem(r, 2, QTableWidgetItem("—"))
 
     # ── Actions ────────────────────────────────────────────────────
