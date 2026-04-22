@@ -389,6 +389,13 @@ class FetchChannelWorker(QThread):
                 _upd["tiktok_url"] = self.tiktok_url
             db.update_channel(self.channel_id, **_upd)
 
+        # ── 2.1. Упорядочиваем привязку TikTok (если указан handle) ──
+        if self.tiktok_handle and self.channel_id:
+            try:
+                db.ensure_tiktok_link(self.channel_id, self.tiktok_handle)
+            except Exception as e:
+                log.warning("ensure_tiktok_link failed: %s", e)
+
         # ── 3. Список видео ──
         limit_info = f" (до {self.video_limit})" if self.video_limit > 0 else " (все видео)"
         self.status_msg.emit(f"Загрузка списка видео{limit_info}…")

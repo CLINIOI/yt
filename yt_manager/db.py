@@ -248,6 +248,10 @@ class Database:
             )
         """)
 
+        # ── Миграция: перенос channels.tiktok_handle → tiktok_channels
+        #    + tiktok_youtube_link. Идемпотентно (INSERT OR IGNORE). ──
+        self._migrate_tiktok_links_from_channels(cur)
+
         # ── Настройки автоматизации (1 к 1 с YouTube-каналом) ───────
         # Миграция: если таблица уже существует со старой схемой (tiktok_id)
         # — переносим записи на все привязанные YouTube-каналы через
@@ -291,6 +295,54 @@ class Database:
     # ─────────────────────────────────────────────────────────────────
     # МИГРАЦИИ
     # ─────────────────────────────────────────────────────────────────
+
+    def _migrate_tiktok_links_from_channels(self, cur) -> None:
+        """Переносит channels.tiktok_handle/tiktok_url в tiktok_channels
+        и tiktok_youtube_link. Идемпотентно (INSERT OR IGNORE).
+
+        Срабатывает при каждом старте — старые каналы с заполненной
+        колонкой tiktok_handle получают полноценную привязку, которую
+        ожидает AutomationPage.
+        """
+        try:
+            rows = cur.execute(
+                "SELECT id, tiktok_handle, tiktok_url FROM channels "
+                "WHERE tiktok_handle IS NOT NULL AND tiktok_handle != ''"
+            ).fetchall()
+        except Exception:
+            return
+
+        for row in rows:
+            ch_id = row["id"]
+            raw = (row["tiktok_handle"] or "").strip().lstrip("@")
+            if not raw:
+                continue
+            try:
+                tt = cur.execute(
+                    "SELECT id FROM tiktok_channels WHERE handle = ?", (raw,)
+                ).fetchone()
+                if tt:
+                    tt_id = tt["id"]
+                else:
+                    cur.execute(
+                        "INSERT INTO tiktok_channels(handle, display_name) "
+                        "VALUES(?, ?)", (raw, raw)
+                    )
+                    tt_id = cur.lastrowid
+                cur.execute(
+                    "INSERT OR IGNORE INTO tiktok_youtube_link "
+                    "(tiktok_id, youtube_id) VALUES(?, ?)",
+                    (int(tt_id), int(ch_id))
+                )
+            except Exception as e:
+                try:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "tiktok-link migration row id=%s skipped: %s", ch_id, e
+                    )
+                except Exception:
+                    pass
+        self.conn.commit()
 
     def _migrate_automation_settings(self, cur) -> None:
         """Неразрушающая миграция automation_settings: tiktok_id → channel_id.
@@ -922,6 +974,49 @@ class Database:
     # ─────────────────────────────────────────────────────────────────
     # СВЯЗИ TikTok ↔ YouTube
     # ─────────────────────────────────────────────────────────────────
+
+    def ensure_tiktok_link(self, channel_id: int,
+                           tiktok_handle: str | None) -> int | None:
+        """Гарантирует запись TikTok-канала и связь с YouTube-каналом.
+
+        Нормализует handle, при необходимости создаёт запись в
+        tiktok_channels и заводит связь в tiktok_youtube_link.
+        Возвращает id TikTok-канала либо None (пустой handle).
+        """
+        if not tiktok_handle:
+            return None
+        handle = str(tiktok_handle).strip().lstrip("@")
+        if not handle:
+            return None
+        try:
+            row = self.conn.execute(
+                "SELECT id FROM tiktok_channels WHERE handle = ?", (handle,)
+            ).fetchone()
+            if row:
+                tt_id = int(row["id"])
+            else:
+                cur = self.conn.cursor()
+                cur.execute(
+                    "INSERT INTO tiktok_channels (handle, display_name) "
+                    "VALUES (?, ?)", (handle, handle)
+                )
+                tt_id = int(cur.lastrowid)
+            self.conn.execute(
+                "INSERT OR IGNORE INTO tiktok_youtube_link "
+                "(tiktok_id, youtube_id) VALUES (?, ?)",
+                (int(tt_id), int(channel_id))
+            )
+            self._commit()
+            return tt_id
+        except Exception as e:
+            try:
+                import logging
+                logging.getLogger(__name__).exception(
+                    "ensure_tiktok_link failed: %s", e
+                )
+            except Exception:
+                pass
+            return None
 
     def link_tiktok_to_youtube(self, tiktok_id: int, youtube_id: int) -> bool:
         try:
