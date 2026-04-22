@@ -117,12 +117,12 @@ class PublishPage(BasePage):
         lay.addLayout(tools)
 
         # Таблица скриптов
-        self.tbl = QTableWidget(0, 5)
+        self.tbl = QTableWidget(0, 6)
         self.tbl.setHorizontalHeaderLabels(
-            ["Заголовок", "Теги", "Статус", "Создан", "Действия"]
+            ["Заголовок", "Теги", "Статус", "Создан", "Время публикации", "Действия"]
         )
         self.tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.tbl.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         self.tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.tbl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.tbl.verticalHeader().setVisible(False)
@@ -174,6 +174,7 @@ class PublishPage(BasePage):
             self.tbl.setItem(r, 1, QTableWidgetItem(s.get("hashtags") or ""))
             self.tbl.setItem(r, 2, QTableWidgetItem(s.get("status") or "draft"))
             self.tbl.setItem(r, 3, QTableWidgetItem(s.get("created_at") or ""))
+            self.tbl.setItem(r, 4, QTableWidgetItem(s.get("scheduled_at") or "—"))
 
             # Кнопки действий
             w = QWidget()
@@ -189,7 +190,7 @@ class PublishPage(BasePage):
             hl.addWidget(btn_copy)
             hl.addWidget(btn_cancel)
             hl.addWidget(btn_done)
-            self.tbl.setCellWidget(r, 4, w)
+            self.tbl.setCellWidget(r, 5, w)
 
         # Баннер «нужны клипы»
         done = [s for s in scripts if s.get("status") == "done"]
@@ -204,11 +205,23 @@ class PublishPage(BasePage):
         s = db.get_publish_script(script_id)
         if not s:
             return
-        # Пересобираем строку из сохранённых полей
+        # Строим строку для userscript из сохранённых полей.
+        # Caption — это полное описание (заголовок + хэштеги по шаблону),
+        # его передаём отдельно; scheduled_at — время публикации.
         tags = s.get("hashtags") or ""
         path = s.get("file_path") or ""
-        caption = s.get("title") or ""
-        text = s.get("caption") or build_string(path, tags, datetime.now(), caption)
+        caption = s.get("caption") or s.get("title") or ""
+        sched_raw = s.get("scheduled_at")
+        when = datetime.now()
+        if sched_raw:
+            try:
+                when = datetime.strptime(sched_raw, "%Y-%m-%d %H:%M")
+            except Exception:
+                try:
+                    when = datetime.fromisoformat(sched_raw)
+                except Exception:
+                    when = datetime.now()
+        text = build_string(path, tags, when, caption)
         QGuiApplication.clipboard().setText(text)
         db.update_publish_script_status(script_id, "marked")
         self._refresh_table()

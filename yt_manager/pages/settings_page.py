@@ -203,6 +203,7 @@ class SettingsPage(BasePage):
 
         root.addWidget(self._build_disk_group())
         root.addWidget(self._build_cookies_group())
+        root.addWidget(self._build_publish_group())
         root.addWidget(self._build_theme_group())
         root.addWidget(self._build_bridge_group())
         root.addWidget(self._build_userscript_group())
@@ -599,6 +600,19 @@ class SettingsPage(BasePage):
         lay.addWidget(btn)
         return g
 
+    def _build_publish_group(self) -> QGroupBox:
+        g = QGroupBox("Публикация")
+        lay = QVBoxLayout(g)
+        lay.addWidget(QLabel(
+            "Шаблон описания (caption). Плейсхолдеры: "
+            "{title}, {hashtags}, {channel}, {date}."
+        ))
+        self.ed_caption_tpl = QPlainTextEdit()
+        self.ed_caption_tpl.setPlaceholderText("{title}\n\n{hashtags}")
+        self.ed_caption_tpl.setFixedHeight(90)
+        lay.addWidget(self.ed_caption_tpl)
+        return g
+
     # ── Data ───────────────────────────────────────────────────────
     def refresh(self):
         self.sp_disk_limit.setValue(int(db.get_setting("disk_limit_gb", 0) or 0))
@@ -633,6 +647,9 @@ class SettingsPage(BasePage):
         self.chk_mobile_clients.setChecked(mobile)
         self.lbl_cookies_status.setText("")
         self._update_applied_cookies_label()
+        self.ed_caption_tpl.setPlainText(
+            str(db.get_setting("publish_caption_template", "") or "")
+        )
 
     def _save_all(self):
         db.set_setting("disk_limit_gb", int(self.sp_disk_limit.value()))
@@ -641,6 +658,8 @@ class SettingsPage(BasePage):
         db.set_setting("bridge_port", int(self.sp_bridge_port.value()))
         db.set_setting("bridge_token", self.ed_bridge_token.text().strip() or "1224444")
         self._save_cookies_settings()
+        tpl = self.ed_caption_tpl.toPlainText().strip()
+        db.set_setting("publish_caption_template", tpl or "{title}\n\n{hashtags}")
         QMessageBox.information(self, "Сохранено", "Настройки сохранены.")
 
     # ── Actions ────────────────────────────────────────────────────

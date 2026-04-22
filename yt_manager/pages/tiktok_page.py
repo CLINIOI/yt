@@ -35,6 +35,38 @@ from tiktok.script_builder import build_string
 log = logging.getLogger(__name__)
 
 
+_TIME_SLOT_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
+
+
+def _next_free_slot(schedule: list, busy: set) -> str | None:
+    """Возвращает ближайший свободный слот публикации в формате
+    'YYYY-MM-DD HH:MM'. `schedule` — список строк 'HH:MM' из
+    графика канала; `busy` — уже занятые (точные строки).
+    Если расписание пусто — возвращает None (планирование не задано)."""
+    if not schedule:
+        return None
+    slots = sorted({s for s in schedule if _TIME_SLOT_RE.match(s)})
+    if not slots:
+        return None
+    from datetime import timedelta
+    today = datetime.now().date()
+    for day_offset in range(0, 30):
+        d = today + timedelta(days=day_offset)
+        for hhmm in slots:
+            candidate = f"{d.isoformat()} {hhmm}"
+            # На сегодня — только будущие
+            if day_offset == 0:
+                h, m = hhmm.split(":")
+                dt_cand = datetime.combine(
+                    d, datetime.min.time().replace(hour=int(h), minute=int(m))
+                )
+                if dt_cand < datetime.now():
+                    continue
+            if candidate not in busy:
+                return candidate
+    return None
+
+
 class AddTikTokDialog(QDialog):
     """Модалка создания нового TikTok-канала."""
 
@@ -494,21 +526,58 @@ class TikTokPage(BasePage):
             return
 
         base_tags = ch.get("hashtags", [])
+        schedule = ch.get("schedule") or []  # ["HH:MM", ...]
+        caption_tpl = (db.get_setting("publish_caption_template")
+                       or "{title}\n\n{hashtags}")
+
+        # Занятые слоты: уже назначенные scheduled_at у активных скриптов
+        busy_slots = set()
+        for s in existing:
+            if s.get("status") == "done":
+                continue
+            if s.get("scheduled_at"):
+                busy_slots.add(s["scheduled_at"])
+
         n = min(10, len(available))
+        ch_name = ch.get("display_name") or f"@{ch.get('handle','')}"
+
         for c in available[:n]:
-            base_name = os.path.splitext(os.path.basename(c.get("file_path") or ""))[0] or "Клип"
-            tags = generate_hashtags(base_name, base_tags, limit=5)
+            # Заголовок — из связанного видео, а не имя файла
+            src_vid = c.get("source_video_id")
+            video = db.get_video(src_vid) if src_vid else None
+            title = (video.get("title") if video else None) \
+                    or os.path.splitext(
+                        os.path.basename(c.get("file_path") or "")
+                    )[0] \
+                    or "Клип"
+
+            tags = generate_hashtags(title, base_tags, limit=5)
             tags_str = " ".join(tags)
-            caption = base_name
-            # file_path в скрипте — полный путь до клипа (bridge будет его отдавать)
-            built = build_string(c.get("file_path") or "", tags, datetime.now(), caption)
+
+            scheduled_at = _next_free_slot(schedule, busy_slots)
+            if scheduled_at:
+                busy_slots.add(scheduled_at)
+
+            # Caption по шаблону. Поддерживаемые плейсхолдеры:
+            # {title}, {hashtags}, {channel}, {date}
+            try:
+                caption_text = caption_tpl.format(
+                    title=title,
+                    hashtags=tags_str,
+                    channel=ch_name,
+                    date=(scheduled_at or datetime.now().strftime("%Y-%m-%d %H:%M")),
+                )
+            except Exception:
+                caption_text = f"{title}\n\n{tags_str}"
+
             db.add_publish_script(
                 tiktok_id=self._current_id,
                 clip_id=c["id"],
-                title=base_name,
+                title=title,
                 file_path=c.get("file_path"),
                 hashtags=tags_str,
-                caption=built,
+                caption=caption_text,
+                scheduled_at=scheduled_at,
                 status="draft",
             )
         self._refresh_current()
