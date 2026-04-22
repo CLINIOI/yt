@@ -27,6 +27,7 @@ from pages.processing_page  import ProcessingPage
 from pages.folders_page     import FoldersPage
 from pages.stats_page       import StatsPage
 from pages.presets_page     import PresetsPage
+from pages.settings_page    import SettingsPage
 from pages.typewriter_page  import TypewriterPage
 
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
@@ -106,11 +107,12 @@ NAV_ITEMS = [
     ("📁", "  Папки",          4, "nav_btn"),
     ("📊", "  Статистика",     5, "nav_btn"),
     ("🎛", "  Пресеты",        6, "nav_btn"),
-    ("🎬", "  Видео-генератор", 7, "nav_btn_tw"),
+    ("🛠", "  Настройки",      7, "nav_btn"),
+    ("🎬", "  Видео-генератор", 8, "nav_btn_tw"),
 ]
 
 # Страницы, которые обновляются при каждом переходе
-REFRESH_ON_VISIT: set[int] = {1, 2, 3, 4, 5}   # TikTok, Automation, Publish, Folders, Stats
+REFRESH_ON_VISIT: set[int] = {1, 2, 3, 4, 5, 7}   # TikTok, Automation, Publish, Folders, Stats, Settings
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -207,7 +209,7 @@ class MainWindow(QMainWindow):
 
         for icon, label, idx, obj_name in NAV_ITEMS:
             # Добавляем разделитель перед вкладкой Typewriter
-            if idx == 7:
+            if idx == 8:
                 lay.addSpacing(8)
                 lay.addWidget(self._hdiv())
                 lay.addSpacing(8)
@@ -295,6 +297,7 @@ class MainWindow(QMainWindow):
         self.page_folders     = FoldersPage()
         self.page_stats       = StatsPage()
         self.page_presets     = PresetsPage()
+        self.page_settings    = SettingsPage()
         self.page_typewriter  = TypewriterPage()
         # ProcessingPage оставлен как внутренний инструмент — не в навигации
         self.page_processing  = ProcessingPage()
@@ -302,7 +305,8 @@ class MainWindow(QMainWindow):
         for page in [self.page_channels, self.page_tiktok,
                      self.page_automation, self.page_publish,
                      self.page_folders, self.page_stats,
-                     self.page_presets, self.page_typewriter]:
+                     self.page_presets, self.page_settings,
+                     self.page_typewriter]:
             self.stack.addWidget(page)
 
         return self.stack
