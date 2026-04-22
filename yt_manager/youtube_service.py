@@ -90,6 +90,9 @@ def _resolve_cookie_opts(db=None) -> dict:
 
     Если db не передан — используем глобальный инстанс `db` из модуля db.
     При любой ошибке откатываемся на автологику (обратная совместимость).
+
+    Логирует применяемый режим и итоговый словарь опций, чтобы в логе
+    было видно, какие куки реально используются при каждом вызове.
     """
     try:
         if db is None:
@@ -105,6 +108,7 @@ def _resolve_cookie_opts(db=None) -> dict:
     except Exception:
         mode = "auto"
 
+    result: dict = {}
     if mode == "browser":
         try:
             browser = (db.get_setting("yt_cookies_browser", "chrome") or "chrome").strip().lower()
@@ -112,20 +116,78 @@ def _resolve_cookie_opts(db=None) -> dict:
             browser = "chrome"
         if browser not in _SUPPORTED_BROWSERS:
             browser = "chrome"
-        return {"cookiesfrombrowser": (browser,)}
-
-    if mode == "file":
+        result = {"cookiesfrombrowser": (browser,)}
+    elif mode == "file":
         try:
             path = (db.get_setting("yt_cookies_file", "") or "").strip()
         except Exception:
             path = ""
         if path and Path(path).exists():
-            return {"cookiefile": path}
-        # Файл не найден — откат на авто
-        log.warning("yt_cookies_file не существует (%s), откат на auto", path)
-        return _auto_resolve_cookies()
+            result = {"cookiefile": path}
+        else:
+            log.warning("yt_cookies_file не существует (%s), откат на auto", path)
+            result = _auto_resolve_cookies()
+            mode = "auto(fallback)"
+    else:
+        result = _auto_resolve_cookies()
 
-    return _auto_resolve_cookies()
+    log.info("cookies: mode=%s, result=%r", mode, result)
+    return result
+
+
+def describe_cookie_opts(db=None) -> str:
+    """Короткое человекочитаемое описание применяемых куки — для UI.
+
+    Примеры: "Из файла /home/user/cookies.txt",
+    "Из браузера chrome", "Авто (cookies.txt рядом с проектом)",
+    "Авто (ничего не найдено)".
+    """
+    opts = _resolve_cookie_opts(db)
+    if "cookiefile" in opts:
+        return f"Из файла {opts['cookiefile']}"
+    if "cookiesfrombrowser" in opts:
+        br = opts["cookiesfrombrowser"]
+        name = br[0] if isinstance(br, (tuple, list)) and br else str(br)
+        return f"Из браузера {name}"
+    return "Авто (куки не применяются — yt-dlp работает без авторизации)"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# EXTRACTOR ARGS — обход проверки бота через мобильные клиенты
+# ─────────────────────────────────────────────────────────────────────
+
+def _resolve_extractor_args(db=None) -> dict:
+    """Возвращает extractor_args для yt-dlp, если включён режим
+    «Мобильные клиенты» (ключ `yt_use_mobile_clients`, по умолчанию True).
+
+    Использование клиентов ios/android часто обходит проверку
+    «Sign in to confirm you're not a bot» даже без куки.
+    """
+    try:
+        if db is None:
+            from db import db as _db
+            db = _db
+    except Exception:
+        db = None
+
+    use_mobile = True
+    try:
+        if db is not None:
+            raw = db.get_setting("yt_use_mobile_clients", True)
+            if isinstance(raw, str):
+                use_mobile = raw.strip().lower() not in ("0", "false", "no", "")
+            else:
+                use_mobile = bool(raw) if raw is not None else True
+    except Exception:
+        use_mobile = True
+
+    if not use_mobile:
+        return {}
+    return {
+        "youtube": {
+            "player_client": ["ios", "android", "web"],
+        }
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -228,9 +290,17 @@ class YouTubeService:
         "audio": "bestaudio*/best",
     }
 
-    def __init__(self):
+    def __init__(self, db=None):
         # Последнее понятное сообщение об ошибке (для UI)
         self._last_error_message: str = ""
+        # Инстанс БД — используется для чтения настроек куки.
+        # Если не передан, в _resolve_cookie_opts произойдёт fallback
+        # на глобальный `from db import db` (обратная совместимость).
+        self.db = db
+
+    def set_db(self, db) -> None:
+        """Позволяет пробросить инстанс БД уже после создания сервиса."""
+        self.db = db
 
     @property
     def last_error_message(self) -> str:
@@ -240,11 +310,19 @@ class YouTubeService:
     COOKIES_FILE: str = AUTO_COOKIES_FILE
 
     def _cookie_opts(self) -> dict:
-        """Опции куки для yt-dlp — используют настройки пользователя.
+        """Опции куки для yt-dlp — используют настройки пользователя."""
+        return _resolve_cookie_opts(self.db)
 
-        Делегируется в `_resolve_cookie_opts` (auto / browser / file).
-        """
-        return _resolve_cookie_opts()
+    def _extractor_args(self) -> dict:
+        """extractor_args (мобильные клиенты YouTube — обход проверки бота)."""
+        args = _resolve_extractor_args(self.db)
+        return {"extractor_args": args} if args else {}
+
+    def _common_opts(self) -> dict:
+        """Общие опции yt-dlp: куки + extractor_args. Используется во всех методах."""
+        opts = dict(self._cookie_opts())
+        opts.update(self._extractor_args())
+        return opts
 
 
 
@@ -260,7 +338,7 @@ class YouTubeService:
             "no_warnings":  True,
             "extract_flat": "in_playlist",
             "playlistend":  5,      # достаточно для получения мета
-            **self._cookie_opts(),
+            **self._common_opts(),
         }
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -320,7 +398,7 @@ class YouTubeService:
             "no_warnings":  True,
             "extract_flat": "in_playlist",
             **({"playlistend": limit} if limit > 0 else {}),
-            **self._cookie_opts(),
+            **self._common_opts(),
         }
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -423,7 +501,7 @@ class YouTubeService:
             "no_warnings":  True,
             "extract_flat": "in_playlist",
             **({"playlistend": limit} if limit > 0 else {}),
-            **self._cookie_opts(),
+            **self._common_opts(),
         }
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -449,7 +527,7 @@ class YouTubeService:
         opts = {
             "quiet":       True,
             "no_warnings": True,
-            **self._cookie_opts(),
+            **self._common_opts(),
         }
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -552,12 +630,31 @@ class YouTubeService:
             "postprocessor_hooks": [_postprocessor_hook],
             "writethumbnail":     False,
             "nooverwrites":       True,
-            **self._cookie_opts(),
+            **self._common_opts(),
         }
 
-        try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
+        def _run_download(run_opts: dict) -> None:
+            with yt_dlp.YoutubeDL(run_opts) as ydl:
                 ydl.download([url])
+
+        try:
+            try:
+                _run_download(opts)
+            except yt_dlp.utils.DownloadError as e:
+                # Fallback: если формат недоступен — пробуем 'best' без format_sort.
+                if "format is not available" in str(e).lower():
+                    log.warning(
+                        "download_video: формат %r недоступен для %s, "
+                        "fallback на 'best' без format_sort",
+                        fmt, yt_id_or_url,
+                    )
+                    fb_opts = dict(opts)
+                    fb_opts["format"] = "best"
+                    fb_opts.pop("format_sort", None)
+                    downloaded_path.clear()
+                    _run_download(fb_opts)
+                else:
+                    raise
 
             result = downloaded_path[-1] if downloaded_path else None
             # Переименование: убираем коды [XXXX] из имени файла
@@ -671,6 +768,7 @@ class DownloadWorker(QThread):
         output_dir: str,
         quality:    str = "1080p",
         parent=None,
+        db=None,
     ):
         super().__init__(parent)
         self.video_id   = video_id
@@ -678,7 +776,9 @@ class DownloadWorker(QThread):
         self.output_dir = output_dir
         self.quality    = quality
         self._cancel    = [False]   # передаётся в download_video как cancel_flag
-        self._service   = YouTubeService()
+        # Пробрасываем db в сервис → в _cookie_opts, чтобы пользовательские
+        # настройки куки реально применялись при каждой загрузке.
+        self._service   = YouTubeService(db=db)
 
     def run(self):
         """Выполняется в отдельном потоке при worker.start()."""
@@ -715,5 +815,15 @@ class DownloadWorker(QThread):
 # ─────────────────────────────────────────────────────────────────────
 # Глобальный инстанс сервиса
 # ─────────────────────────────────────────────────────────────────────
+#
+# `yt_service.db` будет None до инициализации БД. При обращении к
+# настройкам куки сработает fallback на `from db import db`. Для явного
+# проброса после импорта db — вызывайте `yt_service.set_db(db)`.
 
 yt_service = YouTubeService()
+
+try:
+    from db import db as _global_db
+    yt_service.set_db(_global_db)
+except Exception:
+    pass
