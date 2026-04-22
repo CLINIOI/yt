@@ -1,14 +1,18 @@
 # pages/automation_page.py — Страница «Автоматизация»
 #
-# Управление автоматическим пайплайном для конкретного TikTok-канала:
+# Управление автоматическим пайплайном для конкретного YouTube-канала:
 #   • Фильтры видео (длительность, возраст, популярные в запас)
 #   • Три блока-карточки (включаемые чекбоксами):
-#       1. Скачивание — проходится по привязанным YouTube-каналам
+#       1. Скачивание — новые видео выбранного YouTube-канала
 #       2. Монтаж     — обработка скачанного (cut/merge/stack)
-#       3. Клипы      — нарезка обработанного на куски по N секунд
-#   • Авто-триггер: раз в N минут проверяет запас готовых клипов
+#       3. Клипы      — нарезка обработанного, раскидывается по
+#                       привязанным TikTok-каналам через
+#                       tiktok_youtube_link
+#   • Авто-триггер: раз в 15 минут обходит YouTube-каналы с
+#     включённой автоматизацией и добирает клипы для их TikTok-каналов
 #
-# Старая страница ProcessingPage остаётся отдельно (для ручной нарезки).
+# Старая страница «Обработка» (ProcessingPage) остаётся отдельно —
+# для ручной композиции.
 
 from __future__ import annotations
 
@@ -18,9 +22,9 @@ from typing import Optional
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QFileDialog, QFrame, QGroupBox, QHBoxLayout,
-    QHeaderView, QLabel, QMessageBox, QPushButton, QSpinBox,
-    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QLineEdit,
+    QCheckBox, QComboBox, QFileDialog, QGroupBox, QHBoxLayout,
+    QLabel, QMessageBox, QPushButton, QSpinBox,
+    QVBoxLayout, QLineEdit,
 )
 
 from pages.base_page import BasePage
@@ -37,7 +41,6 @@ def _match_video_filters(v: dict, f: dict) -> bool:
         return False
     if dur > int(f.get("max_duration_sec") or 10 ** 9):
         return False
-    # upload_date — YYYYMMDD строкой
     if f.get("max_age_days"):
         upd = v.get("upload_date")
         if upd and len(upd) == 8:
@@ -52,7 +55,7 @@ def _match_video_filters(v: dict, f: dict) -> bool:
 
 
 class AutomationPage(BasePage):
-    """Автоматизация: фильтры, блоки, авто-триггер."""
+    """Автоматизация: выбор YouTube-канала, фильтры, блоки, авто-триггер."""
 
     PAGE_TITLE = "Автоматизация"
 
@@ -60,14 +63,13 @@ class AutomationPage(BasePage):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._current_tiktok: Optional[int] = None
+        self._current_channel: Optional[int] = None
         self._auto_timer = QTimer(self)
         self._auto_timer.setInterval(15 * 60 * 1000)  # каждые 15 минут
         self._auto_timer.timeout.connect(self._run_auto_check)
 
         self._build_ui()
         self.refresh()
-        # Таймер стартует только если есть хотя бы один включённый блок
         self._maybe_start_timer()
 
     # ── UI ─────────────────────────────────────────────────────────
@@ -76,9 +78,8 @@ class AutomationPage(BasePage):
         root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(12)
 
-        # Верх: выбор канала
         top = QHBoxLayout()
-        top.addWidget(QLabel("TikTok-канал:"))
+        top.addWidget(QLabel("YouTube-канал:"))
         self.cmb_channel = QComboBox()
         self.cmb_channel.setMinimumWidth(260)
         self.cmb_channel.currentIndexChanged.connect(self._on_channel_changed)
@@ -89,16 +90,18 @@ class AutomationPage(BasePage):
         top.addWidget(self.lbl_status)
         root.addLayout(top)
 
-        # Фильтры
+        self.lbl_tiktoks = QLabel("")
+        self.lbl_tiktoks.setStyleSheet("color: #5a5957;")
+        self.lbl_tiktoks.setWordWrap(True)
+        root.addWidget(self.lbl_tiktoks)
+
         root.addWidget(self._build_filters_group())
-        # Три блока
         root.addWidget(self._build_download_block())
         root.addWidget(self._build_processing_block())
         root.addWidget(self._build_clip_block())
 
         root.addStretch()
 
-        # Кнопка «Сохранить»
         bar = QHBoxLayout()
         bar.addStretch()
         btn_save = QPushButton("Сохранить настройки")
@@ -143,7 +146,7 @@ class AutomationPage(BasePage):
         g.setTitle("Скачивание новых видео")
         lay = QVBoxLayout(g)
         row = QHBoxLayout()
-        lbl = QLabel("Идёт по привязанным YouTube-каналам и добавляет новые видео в очередь.")
+        lbl = QLabel("Добавляет новые видео выбранного YouTube-канала в очередь загрузки.")
         lbl.setWordWrap(True)
         row.addWidget(lbl, 1)
         btn = QPushButton("Запустить скачивание")
@@ -215,13 +218,11 @@ class AutomationPage(BasePage):
 
     # ── Data ───────────────────────────────────────────────────────
     def refresh(self):
-        prev = self._current_tiktok
+        prev = self._current_channel
         self.cmb_channel.blockSignals(True)
         self.cmb_channel.clear()
-        for ch in db.list_tiktok_channels():
-            label = f"@{ch['handle']}"
-            if ch.get("display_name"):
-                label = f"{ch['display_name']}  ({label})"
+        for ch in db.get_all_channels():
+            label = ch.get("title") or ch.get("url") or f"channel #{ch['id']}"
             self.cmb_channel.addItem(label, ch["id"])
         self.cmb_channel.blockSignals(False)
         if prev:
@@ -231,12 +232,13 @@ class AutomationPage(BasePage):
         self._on_channel_changed()
 
     def _on_channel_changed(self):
-        tid = self.cmb_channel.currentData()
-        self._current_tiktok = int(tid) if tid else None
-        if not self._current_tiktok:
+        cid = self.cmb_channel.currentData()
+        self._current_channel = int(cid) if cid else None
+        if not self._current_channel:
             self.lbl_status.setText("Нет выбранного канала.")
+            self.lbl_tiktoks.setText("")
             return
-        s = db.get_automation_settings(self._current_tiktok)
+        s = db.get_automation_settings(self._current_channel)
         self.sp_min_dur.setValue(int(s.get("min_duration_sec") or 300))
         self.sp_max_dur.setValue(int(s.get("max_duration_sec") or 1800))
         self.sp_max_age.setValue(int(s.get("max_age_days") or 7))
@@ -249,20 +251,29 @@ class AutomationPage(BasePage):
         self.ed_background.setText(s.get("background_dir") or "")
         self.sp_clip_dur.setValue(int(s.get("clip_duration_sec") or 30))
 
-        ready = db.count_ready_clips(self._current_tiktok)
-        ch = db.get_tiktok_channel(self._current_tiktok)
-        buf = ch.get("clip_min_buffer", 10) if ch else 10
-        self.lbl_status.setText(
-            f"Готовых клипов: {ready} / {buf}"
-        )
+        tt_list = db.list_tiktok_for_youtube(self._current_channel)
+        if tt_list:
+            handles = ", ".join(f"@{t.get('handle')}" for t in tt_list if t.get("handle"))
+            ready_total = sum(db.count_ready_clips(t["id"]) for t in tt_list)
+            self.lbl_tiktoks.setText(
+                f"Привязанные TikTok: {handles or '—'}"
+            )
+            self.lbl_status.setText(f"Готовых клипов по привязкам: {ready_total}")
+        else:
+            self.lbl_tiktoks.setText(
+                "Нет привязанных TikTok-каналов. Привяжите их на вкладке «YouTube каналы»."
+            )
+            self.lbl_status.setText("")
 
     def _save_settings(self):
-        if not self._current_tiktok:
-            QMessageBox.information(self, "Нет канала",
-                                    "Сначала создайте TikTok-канал на вкладке 'TikTok каналы'.")
+        if not self._current_channel:
+            QMessageBox.information(
+                self, "Нет канала",
+                "Сначала добавьте YouTube-канал на вкладке «YouTube каналы»."
+            )
             return
         db.set_automation_settings(
-            self._current_tiktok,
+            self._current_channel,
             download_enabled=int(self.g_download.isChecked()),
             processing_enabled=int(self.g_processing.isChecked()),
             publish_enabled=int(self.g_clips.isChecked()),
@@ -293,17 +304,12 @@ class AutomationPage(BasePage):
         }
 
     def _run_download(self):
-        if not self._current_tiktok:
+        if not self._current_channel:
             QMessageBox.information(self, "Нет канала",
-                                    "Сначала выберите TikTok-канал.")
+                                    "Сначала выберите YouTube-канал.")
             return
-        yt_list = db.list_youtube_for_tiktok(self._current_tiktok)
-        if not yt_list:
-            QMessageBox.information(
-                self, "Нет связей",
-                "К этому TikTok-каналу не привязан ни один YouTube-канал. "
-                "Привяжите их на вкладке YouTube каналов."
-            )
+        c = db.get_channel(self._current_channel)
+        if not c:
             return
         f = self._current_filter()
         queued = 0
@@ -314,34 +320,32 @@ class AutomationPage(BasePage):
             QMessageBox.warning(self, "Ошибка", f"Не удалось получить очередь загрузок: {e}")
             return
 
-        # Импорт здесь — чтобы не требовать channels_page на уровне модуля
         try:
             from pages.channels_page import load_download_dir
         except Exception:
             load_download_dir = None
 
-        for c in yt_list:
-            videos = db.get_videos_by_channel(c["id"], status="new")
-            matched = [v for v in videos if _match_video_filters(v, f)]
-            if not matched and f.get("fallback_popular"):
-                matched = sorted(videos, key=lambda v: v.get("view_count") or 0, reverse=True)[:5]
-            out_dir = (load_download_dir(c.get("title") or "unknown", c["id"])
-                       if load_download_dir else os.path.abspath("downloads"))
-            for v in matched:
-                try:
-                    queue_manager.add(
-                        v["id"], v.get("title") or v.get("yt_id"),
-                        v.get("yt_id"),
-                        output_dir=out_dir,
-                        quality="1080p",
-                    )
-                    queued += 1
-                except Exception as e:
-                    log.warning("queue add failed for %s: %s", v.get("yt_id"), e)
+        videos = db.get_videos_by_channel(c["id"], status="new")
+        matched = [v for v in videos if _match_video_filters(v, f)]
+        if not matched and f.get("fallback_popular"):
+            matched = sorted(videos, key=lambda v: v.get("view_count") or 0, reverse=True)[:5]
+        out_dir = (load_download_dir(c.get("title") or "unknown", c["id"])
+                   if load_download_dir else os.path.abspath("downloads"))
+        for v in matched:
+            try:
+                queue_manager.add(
+                    v["id"], v.get("title") or v.get("yt_id"),
+                    v.get("yt_id"),
+                    output_dir=out_dir,
+                    quality="1080p",
+                )
+                queued += 1
+            except Exception as e:
+                log.warning("queue add failed for %s: %s", v.get("yt_id"), e)
 
         QMessageBox.information(
             self, "Скачивание запущено",
-            f"В очередь добавлено {queued} видео (каналов: {len(yt_list)})."
+            f"В очередь добавлено {queued} видео."
         )
 
     def _run_processing(self):
@@ -353,38 +357,55 @@ class AutomationPage(BasePage):
             "композиции или запустите нарезку клипов."
         )
 
+    def _resolve_target_tiktok(self) -> Optional[int]:
+        """Возвращает id TikTok-канала, куда раскладывать клипы.
+        Если один — возвращает его. Если несколько — берёт первый и
+        пишет варнинг в лог. Если нет — None."""
+        if not self._current_channel:
+            return None
+        tt_ids = db.get_tiktok_for_channel(self._current_channel)
+        if not tt_ids:
+            return None
+        if len(tt_ids) > 1:
+            log.warning(
+                "YouTube-канал %s имеет %d привязок TikTok, использую первую (%s). "
+                "Диалог выбора будет добавлен позже.",
+                self._current_channel, len(tt_ids), tt_ids[0]
+            )
+        return int(tt_ids[0])
+
     def _run_clip_prep(self):
-        """Создаёт записи clips по всем обработанным видео из привязанных
-        YouTube-каналов. Нарезка физических файлов в video_service — TODO,
-        здесь регистрируем ссылки на существующие файлы обработанного."""
-        if not self._current_tiktok:
+        """Регистрирует клипы по обработанным видео выбранного YouTube-канала,
+        раскладывая их в привязанный TikTok-канал."""
+        if not self._current_channel:
             return
-        yt_list = db.list_youtube_for_tiktok(self._current_tiktok)
-        if not yt_list:
-            QMessageBox.information(self, "Нет связей",
-                                    "Нет привязанных YouTube-каналов.")
+        tt_id = self._resolve_target_tiktok()
+        if not tt_id:
+            QMessageBox.warning(
+                self, "Нет привязанного TikTok",
+                "У выбранного YouTube-канала нет привязанного TikTok-канала. "
+                "Привяжите его на вкладке «YouTube каналы»."
+            )
             return
         added = 0
-        for c in yt_list:
-            for v in db.get_videos_by_channel(c["id"], status="processed"):
-                file_path = v.get("file_path")
-                if not file_path or not os.path.isfile(file_path):
-                    continue
-                # Проверяем не добавлен ли уже клип на это видео
-                existing = db.list_clips(self._current_tiktok)
-                if any(cl.get("source_video_id") == v["id"] for cl in existing):
-                    continue
-                db.add_clip(
-                    self._current_tiktok, file_path,
-                    source_video_id=v["id"],
-                    duration=v.get("duration"),
-                    status="ready",
-                )
-                added += 1
+        for v in db.get_videos_by_channel(self._current_channel, status="processed"):
+            file_path = v.get("file_path")
+            if not file_path or not os.path.isfile(file_path):
+                continue
+            existing = db.list_clips(tt_id)
+            if any(cl.get("source_video_id") == v["id"] for cl in existing):
+                continue
+            db.add_clip(
+                tt_id, file_path,
+                source_video_id=v["id"],
+                duration=v.get("duration"),
+                status="ready",
+            )
+            added += 1
         self._on_channel_changed()
         QMessageBox.information(
             self, "Подготовка клипов",
-            f"Добавлено {added} клипов в реестр.\n"
+            f"Добавлено {added} клипов в TikTok-канал id={tt_id}.\n"
             f"Физическая нарезка файлов по {self.sp_clip_dur.value()} сек "
             f"будет подключена в следующей итерации."
         )
@@ -397,31 +418,44 @@ class AutomationPage(BasePage):
 
     # ── Авто-триггер ──────────────────────────────────────────────
     def _maybe_start_timer(self):
-        any_on = any(
-            bool(s.get("download_enabled") or s.get("publish_enabled"))
-            for s in (db.get_automation_settings(ch["id"])
-                      for ch in db.list_tiktok_channels())
-        )
+        any_on = False
+        try:
+            for ch in db.get_all_channels():
+                s = db.get_automation_settings(ch["id"])
+                if s.get("download_enabled") or s.get("publish_enabled"):
+                    any_on = True
+                    break
+        except Exception:
+            any_on = False
         if any_on and not self._auto_timer.isActive():
             self._auto_timer.start()
         elif not any_on and self._auto_timer.isActive():
             self._auto_timer.stop()
 
     def _run_auto_check(self):
-        """Раз в N минут: для каждого TikTok-канала с включённой автоматизацией
-        проверяем запас клипов и добираем."""
+        """Раз в 15 минут: обходит все YouTube-каналы с включённой автоматизацией
+        и для каждого проверяет запас клипов у привязанных TikTok-каналов."""
         try:
-            for ch in db.list_tiktok_channels():
+            for ch in db.get_all_channels():
                 s = db.get_automation_settings(ch["id"])
-                if not s.get("download_enabled") and not s.get("publish_enabled"):
+                if not (s.get("download_enabled") or s.get("publish_enabled")):
                     continue
-                ready = db.count_ready_clips(ch["id"])
-                buf = ch.get("clip_min_buffer", 10)
-                if ready >= buf:
+                tt_list = db.list_tiktok_for_youtube(ch["id"])
+                if not tt_list:
                     continue
-                log.info("auto: канал %s — %d/%d клипов, запускаю пайплайн",
-                         ch["handle"], ready, buf)
-                # Заглушка: если подписан на канал в UI — не запускаем жёстко,
-                # только сообщаем в статусбаре на следующей видимой странице.
+                need_run = False
+                for tt in tt_list:
+                    ready = db.count_ready_clips(tt["id"])
+                    buf = tt.get("clip_min_buffer", 10)
+                    if ready < buf:
+                        need_run = True
+                        log.info(
+                            "auto: TikTok @%s (%d/%d) ниже буфера, триггер по YouTube %s",
+                            tt.get("handle"), ready, buf, ch.get("title") or ch["id"]
+                        )
+                        break
+                if need_run:
+                    log.info("auto: запуск пайплайна для YouTube-канала %s", ch["id"])
+                    # Полная реализация запуска пайплайна — в следующей итерации.
         except Exception:
             log.exception("auto check failed")
