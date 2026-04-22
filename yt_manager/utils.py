@@ -136,6 +136,12 @@ def resolve_path(path: str, base: str | None = None) -> str:
     return os.path.abspath(os.path.join(base or get_project_base(), path))
 
 
+def project_path(*parts: str) -> str:
+    """Склеивает части пути от корня проекта и возвращает абсолютный путь."""
+    cleaned = [sanitize_dirname(str(p)) if p else "" for p in parts if p]
+    return os.path.join(get_project_base(), *cleaned) if cleaned else get_project_base()
+
+
 def ensure_dir(path: str) -> str:
     """Гарантирует существование папки, возвращает её путь."""
     if path:

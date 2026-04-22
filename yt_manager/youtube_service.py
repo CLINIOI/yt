@@ -454,6 +454,20 @@ class YouTubeService:
                 ydl.download([url])
 
             result = downloaded_path[-1] if downloaded_path else None
+            # Переименование: убираем коды [XXXX] из имени файла
+            if result and os.path.isfile(result):
+                try:
+                    from utils import strip_bracket_codes, sanitize_filename
+                    folder = os.path.dirname(result)
+                    base = os.path.basename(result)
+                    cleaned = sanitize_filename(strip_bracket_codes(base))
+                    if cleaned and cleaned != base:
+                        new_path = os.path.join(folder, cleaned)
+                        if not os.path.exists(new_path):
+                            os.rename(result, new_path)
+                            result = new_path
+                except Exception as _e:
+                    log.warning("rename on strip_bracket_codes failed: %s", _e)
             if progress_callback and result:
                 progress_callback(DownloadProgress(percent=100.0, status="finished"))
             return result

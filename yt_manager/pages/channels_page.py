@@ -297,7 +297,33 @@ def sanitize_dirname(name: str) -> str:
     return re.sub(r'[\/:*?"<>|]', "_", name).strip()
 
 
-def load_download_dir(channel_title: str) -> str:
+def load_download_dir(channel_title: str, channel_id: int | None = None) -> str:
+    """
+    Возвращает папку для сохранения видео канала.
+
+    Приоритет путей:
+      1. Если канал привязан к TikTok-каналу → <проект>/каналы/<tt>/<yt>/
+      2. Иначе → config.paths.downloads/<yt> (старая схема, для совместимости)
+
+    Имена везде прогоняются через strip_bracket_codes/sanitize_dirname.
+    """
+    from utils import clean_video_name, sanitize_dirname as _sd, get_project_base
+    yt_name = _sd(clean_video_name(channel_title or "unknown") or "unknown")
+
+    # Ищем связь с TikTok
+    if channel_id:
+        try:
+            from db import db as _db
+            linked = _db.list_tiktok_for_youtube(int(channel_id))
+            if linked:
+                tt = linked[0]  # берём первый связанный
+                tt_dir = _sd(tt.get("handle") or "unknown")
+                new_base = os.path.join(get_project_base(), "каналы", tt_dir, yt_name)
+                return new_base
+        except Exception:
+            pass
+
+    # Старый путь — обратная совместимость
     try:
         with open(CONFIG_PATH, encoding="utf-8") as fh:
             cfg = json.load(fh)
@@ -305,7 +331,7 @@ def load_download_dir(channel_title: str) -> str:
     except Exception:
         base = "./downloads"
     base = os.path.join(os.path.dirname(CONFIG_PATH), base)
-    return os.path.join(base, sanitize_dirname(channel_title or "unknown"))
+    return os.path.join(base, yt_name)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1086,7 +1112,8 @@ class ChannelsPage(QWidget):
         if not ch:
             return
 
-        output_dir = load_download_dir(ch.get("title", "unknown"))
+        output_dir = load_download_dir(ch.get("title", "unknown"),
+                                       channel_id=self._selected_channel_id)
         table  = self._video_table
         queued = 0
 

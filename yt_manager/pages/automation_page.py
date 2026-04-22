@@ -314,17 +314,25 @@ class AutomationPage(BasePage):
             QMessageBox.warning(self, "Ошибка", f"Не удалось получить очередь загрузок: {e}")
             return
 
+        # Импорт здесь — чтобы не требовать channels_page на уровне модуля
+        try:
+            from pages.channels_page import load_download_dir
+        except Exception:
+            load_download_dir = None
+
         for c in yt_list:
             videos = db.get_videos_by_channel(c["id"], status="new")
             matched = [v for v in videos if _match_video_filters(v, f)]
             if not matched and f.get("fallback_popular"):
                 matched = sorted(videos, key=lambda v: v.get("view_count") or 0, reverse=True)[:5]
+            out_dir = (load_download_dir(c.get("title") or "unknown", c["id"])
+                       if load_download_dir else os.path.abspath("downloads"))
             for v in matched:
                 try:
                     queue_manager.add(
                         v["id"], v.get("title") or v.get("yt_id"),
                         v.get("yt_id"),
-                        output_dir=os.path.abspath("downloads"),
+                        output_dir=out_dir,
                         quality="1080p",
                     )
                     queued += 1

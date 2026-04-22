@@ -67,6 +67,12 @@ def ensure_dirs(config: dict):
                 pass
     # Всегда создаём data/
     os.makedirs(os.path.join(BASE_DIR, "data"), exist_ok=True)
+    # Новая файловая структура: каналы, обработанное, клипы
+    for folder in ("каналы", "обработанное", "клипы"):
+        try:
+            os.makedirs(os.path.join(BASE_DIR, folder), exist_ok=True)
+        except Exception:
+            pass
 
 
 def init_db():
