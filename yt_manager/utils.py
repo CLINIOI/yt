@@ -185,6 +185,64 @@ def project_dir(dir_const: str, *parts: str) -> str:
     return os.path.join(get_project_base(), dir_const, *sub) if dir_const else get_project_base()
 
 
+# Handle-заглушка для каналов без привязки к TikTok. Выбрано так, чтобы
+# в UI «Папки» такие каналы собирались под одним понятным узлом рядом
+# с настоящими TikTok-хэндлами, а миграция старой папки downloads/ имела
+# единую целевую подпапку.
+TIKTOK_UNLINKED_HANDLE = "_без_tiktok"
+
+
+def resolve_download_dir(channel_title: str,
+                         channel_id: int | None = None) -> str:
+    """Единая точка резолвинга папки для скачивания видео канала.
+
+    Структура: ``<проект>/загрузки/<tiktok_handle>/<yt_channel>/``. Если
+    у канала нет привязок к TikTok, вместо хэндла используется заглушка
+    ``_без_tiktok`` — так вручную скачанные видео всегда попадают под
+    предсказуемый путь, видимый в UI «Папки».
+    """
+    yt_name = sanitize_dirname(
+        clean_video_name(channel_title or "unknown") or "unknown")
+
+    tt_dir = TIKTOK_UNLINKED_HANDLE
+    if channel_id:
+        try:
+            from db import db as _db
+            linked = _db.list_tiktok_for_youtube(int(channel_id))
+            if linked:
+                handle = (linked[0].get("handle") or "").strip()
+                if handle:
+                    tt_dir = sanitize_dirname(handle)
+        except Exception:
+            pass
+
+    return os.path.join(
+        get_project_base(), DIR_DOWNLOADS, tt_dir, yt_name)
+
+
+def resolve_processed_dir(channel_title: str,
+                          channel_id: int | None = None) -> str:
+    """Зеркальный резолвер для обработанных видео. Используется, когда
+    результат обработки кладётся рядом с иерархией «загрузки/»."""
+    yt_name = sanitize_dirname(
+        clean_video_name(channel_title or "unknown") or "unknown")
+
+    tt_dir = TIKTOK_UNLINKED_HANDLE
+    if channel_id:
+        try:
+            from db import db as _db
+            linked = _db.list_tiktok_for_youtube(int(channel_id))
+            if linked:
+                handle = (linked[0].get("handle") or "").strip()
+                if handle:
+                    tt_dir = sanitize_dirname(handle)
+        except Exception:
+            pass
+
+    return os.path.join(
+        get_project_base(), DIR_PROCESSED, tt_dir, yt_name)
+
+
 def ensure_dir(path: str) -> str:
     """Гарантирует существование папки, возвращает её путь."""
     if path:

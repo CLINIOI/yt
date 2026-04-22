@@ -299,36 +299,13 @@ def sanitize_dirname(name: str) -> str:
 
 def load_download_dir(channel_title: str, channel_id: int | None = None) -> str:
     """
-    Возвращает папку для сохранения видео канала.
-
-    Приоритет путей:
-      1. Если канал привязан к TikTok-каналу → <проект>/загрузки/<tt>/<yt>/
-      2. Иначе → <проект>/загрузки/<yt>/ (без TikTok-привязки)
-
-    Имена везде прогоняются через strip_bracket_codes/sanitize_dirname.
+    Возвращает папку для сохранения видео канала. Тонкая обёртка над
+    ``utils.resolve_download_dir`` — оставлена для обратной совместимости
+    с существующими импортами. Новый код должен импортировать резолвер
+    из ``utils`` напрямую.
     """
-    from utils import (
-        clean_video_name, sanitize_dirname as _sd,
-        get_project_base, DIR_DOWNLOADS,
-    )
-    yt_name = _sd(clean_video_name(channel_title or "unknown") or "unknown")
-
-    # Ищем связь с TikTok
-    if channel_id:
-        try:
-            from db import db as _db
-            linked = _db.list_tiktok_for_youtube(int(channel_id))
-            if linked:
-                tt = linked[0]  # берём первый связанный
-                tt_dir = _sd(tt.get("handle") or "unknown")
-                return os.path.join(
-                    get_project_base(), DIR_DOWNLOADS, tt_dir, yt_name
-                )
-        except Exception:
-            pass
-
-    # Без привязки: <проект>/загрузки/<yt>/
-    return os.path.join(get_project_base(), DIR_DOWNLOADS, yt_name)
+    from utils import resolve_download_dir
+    return resolve_download_dir(channel_title, channel_id)
 
 
 # ─────────────────────────────────────────────────────────────────────
