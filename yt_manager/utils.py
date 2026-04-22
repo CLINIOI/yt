@@ -18,6 +18,24 @@ _BRACKET_CODE_RE = re.compile(r"\s*\[[A-Za-z0-9_\-]+\]\s*")
 _INVALID_FS_CHARS = re.compile(r'[\/:*?"<>|]')
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Имена папок-констант файловой структуры проекта
+# ──────────────────────────────────────────────────────────────────────
+
+DIR_CHANNELS    = "каналы"
+DIR_PROCESSED   = "обработанное"
+DIR_CLIPS       = "клипы"
+DIR_BANNERS     = "баннер"
+DIR_RETENTION   = "удержание"
+DIR_BACKGROUNDS = "фон"
+
+#: Полный список папок, которые ensure_dirs создаёт при старте.
+PROJECT_DIRS = (
+    DIR_CHANNELS, DIR_PROCESSED, DIR_CLIPS,
+    DIR_BANNERS, DIR_RETENTION, DIR_BACKGROUNDS,
+)
+
+
 def strip_bracket_codes(name: str) -> str:
     """
     Убирает коды в квадратных скобках из имени файла/видео.

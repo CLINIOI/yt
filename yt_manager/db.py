@@ -272,9 +272,18 @@ class Database:
                 background_dir      TEXT,
                 clip_duration_sec   INTEGER DEFAULT 30,
                 publish_enabled     INTEGER DEFAULT 1,
+                auto_active         INTEGER DEFAULT 0,
                 updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Миграция: auto_active для старых БД
+        try:
+            cur.execute(
+                "ALTER TABLE automation_settings ADD COLUMN auto_active INTEGER DEFAULT 0"
+            )
+            self._commit()
+        except Exception:
+            pass
 
         # ── Приложение (ключ-значение для настроек) ─────────────────
         cur.execute("""
@@ -1194,27 +1203,69 @@ class Database:
         "background_dir": None,
         "clip_duration_sec": 30,
         "publish_enabled": 1,
+        "auto_active": 0,
     }
+
+    def _default_media_dirs(self) -> dict:
+        """Возвращает дефолтные пути для banner/retention/background.
+        Используется при INSERT в automation_settings и как фолбэк
+        при пустых значениях, чтобы пайплайн всегда находил файлы.
+        """
+        try:
+            from utils import (
+                get_project_base, DIR_BANNERS, DIR_RETENTION, DIR_BACKGROUNDS,
+            )
+        except Exception:
+            base = os.path.dirname(os.path.abspath(__file__))
+            return {
+                "banner_dir":     os.path.join(base, "баннер"),
+                "retention_dir":  os.path.join(base, "удержание"),
+                "background_dir": os.path.join(base, "фон"),
+            }
+        base = get_project_base()
+        return {
+            "banner_dir":     os.path.join(base, DIR_BANNERS),
+            "retention_dir":  os.path.join(base, DIR_RETENTION),
+            "background_dir": os.path.join(base, DIR_BACKGROUNDS),
+        }
 
     def get_automation_settings(self, channel_id: int) -> dict:
         """Возвращает настройки автоматизации для YouTube-канала;
-        создаёт дефолтные если нет."""
+        создаёт дефолтные если нет.
+
+        Если папки banner/retention/background пусты или NULL — в
+        возвращаемом dict подставляются дефолты (<BASE>/баннер/, и т.п.),
+        чтобы вызывающий код мог их использовать как фолбэк. В БД при
+        этом ничего не пишется — пользователь видит «пустое поле +
+        плейсхолдер» в UI.
+        """
         row = self.conn.execute(
             "SELECT * FROM automation_settings WHERE channel_id = ?",
             (int(channel_id),)
         ).fetchone()
-        if row:
-            return dict(row)
-        self.conn.execute(
-            "INSERT INTO automation_settings (channel_id) VALUES (?)",
-            (int(channel_id),)
-        )
-        self._commit()
-        row = self.conn.execute(
-            "SELECT * FROM automation_settings WHERE channel_id = ?",
-            (int(channel_id),)
-        ).fetchone()
-        return dict(row)
+        if not row:
+            defaults = self._default_media_dirs()
+            self.conn.execute(
+                "INSERT INTO automation_settings "
+                "(channel_id, banner_dir, retention_dir, background_dir) "
+                "VALUES (?, ?, ?, ?)",
+                (int(channel_id),
+                 defaults["banner_dir"],
+                 defaults["retention_dir"],
+                 defaults["background_dir"])
+            )
+            self._commit()
+            row = self.conn.execute(
+                "SELECT * FROM automation_settings WHERE channel_id = ?",
+                (int(channel_id),)
+            ).fetchone()
+
+        d = dict(row)
+        defaults = self._default_media_dirs()
+        for key in ("banner_dir", "retention_dir", "background_dir"):
+            if not d.get(key):
+                d[key] = defaults[key]
+        return d
 
     def set_automation_settings(self, channel_id: int, **fields) -> bool:
         allowed = set(self._AUTO_DEFAULTS.keys())
@@ -1231,6 +1282,24 @@ class Database:
         )
         self._commit()
         return True
+
+    def set_auto_active(self, channel_id: int, active: bool) -> bool:
+        """Включает/выключает автоматизацию для конкретного канала."""
+        self.get_automation_settings(int(channel_id))
+        self.conn.execute(
+            "UPDATE automation_settings "
+            "SET auto_active = ?, updated_at = ? WHERE channel_id = ?",
+            (1 if active else 0, datetime.now().isoformat(), int(channel_id))
+        )
+        self._commit()
+        return True
+
+    def list_active_automation_channels(self) -> list[int]:
+        """Возвращает id каналов, у которых включена автоматизация."""
+        rows = self.conn.execute(
+            "SELECT channel_id FROM automation_settings WHERE auto_active = 1"
+        ).fetchall()
+        return [int(r[0]) for r in rows]
 
     def get_tiktok_for_channel(self, channel_id: int) -> list:
         """Возвращает список id TikTok-каналов, привязанных к YouTube-каналу."""

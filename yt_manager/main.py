@@ -67,8 +67,15 @@ def ensure_dirs(config: dict):
                 pass
     # Всегда создаём data/
     os.makedirs(os.path.join(BASE_DIR, "data"), exist_ok=True)
-    # Новая файловая структура: каналы, обработанное, клипы
-    for folder in ("каналы", "обработанное", "клипы"):
+    # Новая файловая структура: каналы, обработанное, клипы, баннер,
+    # удержание, фон. Список тянем из utils.PROJECT_DIRS — это
+    # единственный источник истины об именах папок проекта.
+    try:
+        from utils import PROJECT_DIRS
+    except Exception:
+        PROJECT_DIRS = ("каналы", "обработанное", "клипы",
+                        "баннер", "удержание", "фон")
+    for folder in PROJECT_DIRS:
         try:
             os.makedirs(os.path.join(BASE_DIR, folder), exist_ok=True)
         except Exception:
