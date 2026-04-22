@@ -254,6 +254,7 @@ class DownloadQueueManager(QObject):
             yt_id=task["yt_id"],
             output_dir=task["output_dir"],
             quality=task["quality"],
+            db=db,
         )
         worker.progress_updated.connect(
             lambda p, s, e, v=vid_id: self.progress_updated.emit(v, p, s, e)

@@ -255,9 +255,10 @@ def _pick_random_video(folder: str) -> Optional[str]:
     return random.choice(files) if files else None
 
 def _scan_project_folders() -> dict:
-    """Возвращает {папка_название: [список файлов]} из downloads/ и processed/."""
+    """Возвращает {папка_название: [список файлов]} из загрузки/обработанное/нарезки."""
+    from utils import DIR_DOWNLOADS, DIR_PROCESSED, DIR_CLIPS
     result = {}
-    for base in ['downloads', 'processed', 'clips']:
+    for base in [DIR_DOWNLOADS, DIR_PROCESSED, DIR_CLIPS]:
         base_path = os.path.join(BASE_DIR, base)
         if not os.path.isdir(base_path):
             continue
@@ -954,7 +955,8 @@ class SegmentCut(QWidget):
     def get_output_dir(self, title='') -> str:
         manual = self._out_edit.text().strip()
         if manual: return manual
-        parts = [BASE_DIR, 'processed']
+        from utils import DIR_PROCESSED
+        parts = [BASE_DIR, DIR_PROCESSED]
         if title: parts.append(_sanitize(title))
         return os.path.join(*parts)
 
@@ -1105,7 +1107,8 @@ class SegmentCompose(QWidget):
     def get_output_dir(self) -> str:
         manual = self._out_edit.text().strip()
         if manual: return manual
-        return os.path.join(BASE_DIR, 'processed', 'composition')
+        from utils import DIR_PROCESSED
+        return os.path.join(BASE_DIR, DIR_PROCESSED, 'composition')
 
     def get_render_settings(self) -> dict:
         fmt_map = {
@@ -1160,10 +1163,10 @@ class CleanupPanel(QFrame):
         lay.addWidget(_hdiv())
         lay.addWidget(_lbl('После завершения нарезки автоматически удалять:', 'hint'))
 
-        self._del_downloaded = QCheckBox('Удалять скачанные видео (downloads/)')
+        self._del_downloaded = QCheckBox('Удалять скачанные видео (загрузки/)')
         self._del_downloaded.setObjectName('chk')
         self._del_downloaded.setToolTip(
-            'Удалить исходные файлы из папки downloads/ после того, как нарезка завершена'
+            'Удалить исходные файлы из папки загрузки/ после того, как нарезка завершена'
         )
         lay.addWidget(self._del_downloaded)
 

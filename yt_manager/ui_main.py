@@ -20,92 +20,50 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QCloseEvent
 
 from pages.channels_page    import ChannelsPage
+from pages.tiktok_page      import TikTokPage
+from pages.automation_page  import AutomationPage
+from pages.publish_page     import PublishPage
 from pages.processing_page  import ProcessingPage
 from pages.folders_page     import FoldersPage
 from pages.stats_page       import StatsPage
 from pages.presets_page     import PresetsPage
+from pages.settings_page    import SettingsPage
 from pages.typewriter_page  import TypewriterPage
 
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+THEMES_DIR  = os.path.join(BASE_DIR, "assets", "themes")
 
 # ──────────────────────────────────────────────────────────────────────
-# QSS
+# QSS темы (файлы в assets/themes/{dark,light}.qss)
 # ──────────────────────────────────────────────────────────────────────
 
-DARK_THEME = """
-QMainWindow, QWidget#central { background: #171614; }
 
-/* ── SIDEBAR ── */
-QFrame#sidebar { background: #1c1b19; border-right: 1px solid #2d2c2a; }
-
-QLabel#app_logo {
-    color: #4f98a3; font-size: 20px; font-weight: 700;
-    letter-spacing: 1px; padding: 0 20px;
-}
-QLabel#app_sub  { color: #5a5957; font-size: 10px; padding: 0 20px; }
-
-QFrame#sidebar_div {
-    background: #2d2c2a; border: none;
-    max-height: 1px; margin: 4px 16px;
-}
-
-QLabel#nav_section {
-    color: #5a5957; font-size: 10px;
-    letter-spacing: 1.5px; padding: 0 20px;
-}
-
-QPushButton#nav_btn {
-    background: transparent; border: none; border-radius: 8px;
-    color: #797876; font-size: 13px;
-    text-align: left; padding: 10px 16px;
-    margin: 1px 8px;
-}
-QPushButton#nav_btn:hover   { background: #22211f; color: #cdccca; }
-QPushButton#nav_btn:checked { background: #253535; color: #4f98a3; font-weight: 600; }
-
-/* ── Кнопка Typewriter — особый акцент ── */
-QPushButton#nav_btn_tw {
-    background: transparent; border: none; border-radius: 8px;
-    color: #797876; font-size: 13px;
-    text-align: left; padding: 10px 16px;
-    margin: 1px 8px;
-}
-QPushButton#nav_btn_tw:hover   { background: #22211f; color: #cdccca; }
-QPushButton#nav_btn_tw:checked {
-    background: #1a2a35; color: #4f98a3; font-weight: 600;
-    border-left: 3px solid #4f98a3;
-}
-
-/* ── СТАТУСНАЯ ПАНЕЛЬ САЙДБАРА ── */
-QFrame#sidebar_status { background: #171614; border-top: 1px solid #2d2c2a; }
-QLabel#status_tool    { color: #3a3937; font-size: 11px; }
-QLabel#status_tool[ok="true"]  { color: #437a22; }
-QLabel#status_tool[ok="false"] { color: #964219; }
-
-/* Счётчик загрузок */
-QLabel#dl_counter { color: #5a5957; font-size: 11px; padding: 0 20px; }
-QLabel#dl_counter[active="true"] { color: #4f98a3; }
-
-QLabel#version_label { color: #3a3937; font-size: 10px; padding: 0 20px; }
-
-/* ── STATUSBAR ── */
-QStatusBar { background: #1c1b19; color: #5a5957; font-size: 11px;
-             border-top: 1px solid #2d2c2a; }
-QStatusBar::item { border: none; }
-"""
+def _load_theme_qss(name: str) -> str:
+    """Читает файл assets/themes/<name>.qss. При ошибке возвращает ''."""
+    path = os.path.join(THEMES_DIR, f"{name}.qss")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return ""
 
 NAV_ITEMS = [
-    ("📺", "  Каналы",       0, "nav_btn"),
-    ("⚙️", "  Обработка",    1, "nav_btn"),
-    ("📁", "  Папки",        2, "nav_btn"),
-    ("📊", "  Статистика",   3, "nav_btn"),
-    ("🎛", "  Пресеты",      4, "nav_btn"),
-    ("🎬", "  Видео-генератор", 5, "nav_btn_tw"),
+    ("📺", "  YouTube каналы", 0, "nav_btn"),
+    ("⚙️", "  Автоматизация",  1, "nav_btn"),
+    ("🎞", "  Обработка",      2, "nav_btn"),
+    ("🎵", "  TikTok каналы",  3, "nav_btn"),
+    ("📤", "  Публикация",     4, "nav_btn"),
+    ("📁", "  Папки",          5, "nav_btn"),
+    ("📊", "  Статистика",     6, "nav_btn"),
+    ("🎛", "  Пресеты",        7, "nav_btn"),
+    ("🛠", "  Настройки",      8, "nav_btn"),
+    ("🎬", "  Видео-генератор", 9, "nav_btn_tw"),
 ]
 
 # Страницы, которые обновляются при каждом переходе
-REFRESH_ON_VISIT: set[int] = {2, 3}   # FoldersPage, StatsPage
+# (Автоматизация, Обработка, TikTok, Публикация, Папки, Статистика, Настройки)
+REFRESH_ON_VISIT: set[int] = {1, 2, 3, 4, 5, 6, 8}
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -123,7 +81,12 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._connect_signals()
-        self.setStyleSheet(DARK_THEME)
+        try:
+            from db import db
+            self._theme = db.get_setting("theme", "dark") or "dark"
+        except Exception:
+            self._theme = "dark"
+        self.apply_theme(self._theme)
         self._restore_geometry()
 
         # Открываем первую страницу
@@ -201,8 +164,8 @@ class MainWindow(QMainWindow):
         self._nav_buttons = []
 
         for icon, label, idx, obj_name in NAV_ITEMS:
-            # Добавляем разделитель перед вкладкой Typewriter
-            if idx == 5:
+            # Добавляем разделитель перед вкладкой «Видео-генератор»
+            if idx == 9:
                 lay.addSpacing(8)
                 lay.addWidget(self._hdiv())
                 lay.addSpacing(8)
@@ -284,15 +247,22 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
 
         self.page_channels    = ChannelsPage()
+        self.page_automation  = AutomationPage()
         self.page_processing  = ProcessingPage()
+        self.page_tiktok      = TikTokPage()
+        self.page_publish     = PublishPage()
         self.page_folders     = FoldersPage()
         self.page_stats       = StatsPage()
         self.page_presets     = PresetsPage()
+        self.page_settings    = SettingsPage()
         self.page_typewriter  = TypewriterPage()
 
-        for page in [self.page_channels, self.page_processing,
-                     self.page_folders, self.page_stats,
-                     self.page_presets, self.page_typewriter]:
+        # Порядок страниц в стеке соответствует индексам NAV_ITEMS
+        for page in [self.page_channels, self.page_automation,
+                     self.page_processing, self.page_tiktok,
+                     self.page_publish, self.page_folders,
+                     self.page_stats, self.page_presets,
+                     self.page_settings, self.page_typewriter]:
             self.stack.addWidget(page)
 
         return self.stack
@@ -302,11 +272,35 @@ class MainWindow(QMainWindow):
         self.stack.currentChanged.connect(self._on_page_changed)
         self.page_presets.preset_applied.connect(self._on_preset_applied)
 
+        if hasattr(self.page_tiktok, "request_navigate_automation"):
+            self.page_tiktok.request_navigate_automation.connect(
+                lambda _tid: self._navigate(1)
+            )
+        if hasattr(self.page_publish, "request_open_automation"):
+            self.page_publish.request_open_automation.connect(
+                lambda _tid: self._navigate(1)
+            )
+
         if hasattr(self.page_channels, "download_started"):
             self.page_channels.download_started.connect(self._refresh_dl_counter)
 
         if hasattr(self.page_channels, "download_finished"):
             self.page_channels.download_finished.connect(self._on_download_finished)
+
+        if hasattr(self.page_settings, "theme_changed"):
+            self.page_settings.theme_changed.connect(self.apply_theme)
+
+    # ── ТЕМА ──────────────────────────────────────────────────────────
+    def apply_theme(self, name: str):
+        """Загружает QSS-файл темы и применяет к приложению."""
+        from PyQt6.QtWidgets import QApplication
+        qss = _load_theme_qss(name) or _load_theme_qss("dark")
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(qss)
+        else:
+            self.setStyleSheet(qss)
+        self._theme = name
 
     # ── СЛОТЫ ─────────────────────────────────────────────────────────
     def _navigate(self, idx: int):
@@ -322,6 +316,7 @@ class MainWindow(QMainWindow):
 
     def _on_preset_applied(self, preset_name: str):
         self._statusbar.showMessage(f"Пресет «{preset_name}» применён", 4000)
+        # После применения пресета — переходим в Автоматизацию
         self._navigate(1)
 
     def _on_download_finished(self):
@@ -334,7 +329,7 @@ class MainWindow(QMainWindow):
     def _refresh_dl_counter(self):
         try:
             from download_queue import queue_manager
-            active = queue_manager.active_count()
+            active = queue_manager.active_count
             self._dl_counter.setText(
                 f"{'⏬ ' if active else ''}Загрузок: {active}")
             self._dl_counter.setProperty("active", "true" if active else "false")

@@ -67,6 +67,19 @@ def ensure_dirs(config: dict):
                 pass
     # Всегда создаём data/
     os.makedirs(os.path.join(BASE_DIR, "data"), exist_ok=True)
+    # Новая файловая структура: каналы, обработанное, клипы, баннер,
+    # удержание, фон. Список тянем из utils.PROJECT_DIRS — это
+    # единственный источник истины об именах папок проекта.
+    try:
+        from utils import PROJECT_DIRS
+    except Exception:
+        PROJECT_DIRS = ("загрузки", "обработанное", "нарезки",
+                        "баннер", "удержание", "фон")
+    for folder in PROJECT_DIRS:
+        try:
+            os.makedirs(os.path.join(BASE_DIR, folder), exist_ok=True)
+        except Exception:
+            pass
 
 
 def init_db():
@@ -117,7 +130,12 @@ def main():
         if not should_start:
             sys.exit(0)
     except Exception:
-        pass  # если startup_check недоступен — продолжаем
+        # startup_check недоступен или упал — продолжаем,
+        # но логируем причину, чтобы не молчать о реальной ошибке.
+        import logging
+        logging.getLogger(__name__).exception(
+            "startup_check failed — продолжаем без проверки окружения"
+        )
 
     # 5. БД
     try:
@@ -132,7 +150,76 @@ def main():
         msg.exec()
         sys.exit(1)
 
-    # 6. Главное окно
+    # 6. Одноразовая миграция структуры папок v1 (каналы → загрузки, клипы → нарезки).
+    # ВАЖНО: выполняется ДО миграции имён файлов, чтобы _iter_files видел
+    # уже переименованные папки.
+    try:
+        import logging
+        from utils import migrate_dirs_v1
+        _log = logging.getLogger("dirs_migration")
+        ds = migrate_dirs_v1(BASE_DIR, log=_log)
+        if ds.get("renamed") or ds.get("merged") or ds.get("db_videos") or ds.get("db_clips"):
+            _log.info(
+                "Миграция папок v1: переименовано=%s, слито=%d, "
+                "videos.file_path=%d, clips.file_path=%d, ошибок=%d",
+                ds.get("renamed"), ds.get("merged", 0),
+                ds.get("db_videos", 0), ds.get("db_clips", 0),
+                ds.get("errors", 0),
+            )
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception(
+            "migrate_dirs_v1 упала — продолжаем запуск"
+        )
+
+    # Пересоздаём папки после миграции (на случай, если что-то переименовалось).
+    ensure_dirs(config)
+
+    # 6.1. Миграция старых ручных загрузок: downloads/ → загрузки/_без_tiktok/,
+    # processed/ → обработанное/_без_tiktok/. Выполняется строго после
+    # migrate_dirs_v1, чтобы не конкурировать за каталог «загрузки».
+    try:
+        import logging
+        from utils import migrate_legacy_downloads_v1
+        _log = logging.getLogger("legacy_downloads_migration")
+        ls = migrate_legacy_downloads_v1(BASE_DIR, log=_log)
+        if ls.get("moved") or ls.get("sources"):
+            _log.info(
+                "Миграция downloads/processed: перенесено=%d, пропущено=%d, "
+                "videos.file_path=%d, источники=%s, ошибок=%d",
+                ls.get("moved", 0), ls.get("skipped", 0),
+                ls.get("db_videos", 0), ls.get("sources"),
+                ls.get("errors", 0),
+            )
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception(
+            "migrate_legacy_downloads_v1 упала — продолжаем запуск"
+        )
+
+    ensure_dirs(config)
+
+    # 7. Одноразовая миграция имён файлов (удаление [XXXX])
+    try:
+        import logging
+        from utils import migrate_existing_filenames
+        _log = logging.getLogger("filenames_migration")
+        stats = migrate_existing_filenames(BASE_DIR, log=_log)
+        if stats.get("renamed") or stats.get("db_updated"):
+            _log.info(
+                "Миграция имён файлов: переименовано=%d, в БД обновлено=%d, "
+                "ошибок=%d",
+                stats.get("renamed", 0),
+                stats.get("db_updated", 0),
+                stats.get("errors", 0),
+            )
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception(
+            "migrate_existing_filenames упала — продолжаем запуск"
+        )
+
+    # 7. Главное окно
     from ui_main import MainWindow
     window = MainWindow(config)
     window.show()

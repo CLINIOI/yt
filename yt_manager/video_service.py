@@ -9,12 +9,70 @@ import re
 import logging
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional, Callable
 
 import ffmpeg
 from PyQt6.QtCore import QThread, pyqtSignal
 
 log = logging.getLogger(__name__)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# ВАЛИДАЦИЯ ПАПОК МОНТАЖА
+# ──────────────────────────────────────────────────────────────────────
+
+_VIDEO_EXTS_FOR_VALIDATION = ("*.mp4", "*.mov", "*.mkv", "*.webm")
+
+
+def validate_processing_dirs(
+    banner_dir: Optional[str],
+    retention_dir: Optional[str],
+    background_dir: Optional[str],
+) -> tuple[bool, str]:
+    """
+    Проверяет папки для авто-монтажа: если путь задан, он должен существовать
+    и содержать хотя бы один видеофайл. Пустое значение (None / "") допустимо —
+    соответствующий слой композиции просто не будет использован.
+
+    Возвращает (is_valid, reason). reason — человекочитаемый текст на русском
+    со списком проблем через «; ».
+    """
+    missing: list[str] = []
+    for label, path in (
+        ("баннер",    banner_dir),
+        ("удержание", retention_dir),
+        ("фон",       background_dir),
+    ):
+        if not path:
+            continue
+        p = Path(path)
+        if not p.exists() or not p.is_dir():
+            missing.append(f"{label}: папка не найдена ({path})")
+            continue
+        has_video = any(
+            next(p.glob(pat), None) is not None
+            for pat in _VIDEO_EXTS_FOR_VALIDATION
+        )
+        if not has_video:
+            missing.append(f"{label}: нет видео-файлов в {path}")
+    if missing:
+        return False, "; ".join(missing)
+    return True, ""
+
+
+def pick_first_video(path: Optional[str]) -> Optional[str]:
+    """Возвращает путь к первому найденному видео в папке или None."""
+    if not path:
+        return None
+    p = Path(path)
+    if not p.is_dir():
+        return None
+    for pat in _VIDEO_EXTS_FOR_VALIDATION:
+        match = next(p.glob(pat), None)
+        if match is not None:
+            return str(match)
+    return None
 
 
 # ──────────────────────────────────────────────────────────────────────

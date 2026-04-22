@@ -602,6 +602,7 @@ class PresetsPage(BasePage):
 
         # Описание
         desc_frame = QFrame()
+        self._ed_desc_frame = desc_frame
         desc_frame.setStyleSheet('background:#1c1b19;')
         desc_lay = QHBoxLayout(desc_frame)
         desc_lay.setContentsMargins(20, 8, 20, 8)
@@ -620,6 +621,7 @@ class PresetsPage(BasePage):
 
         # Кнопки действий
         actions = QFrame()
+        self._actions_frame = actions
         actions.setStyleSheet('background:#1c1b19; border-top:1px solid #2d2c2a;')
         act_lay = QHBoxLayout(actions)
         act_lay.setContentsMargins(20, 10, 20, 10)
@@ -659,19 +661,17 @@ class PresetsPage(BasePage):
     # ── Управление видимостью редактора ──────────────────────────────
     def _set_editor_visible(self, visible: bool):
         self._ed_header.setVisible(visible)
+        self._ed_desc_frame.setVisible(visible)
         self._editor.setVisible(visible)
-        for w in [self._ed_desc.parent().parent()]:  # desc_frame through parent chain
-            if hasattr(w, 'layout'):  # simplified
-                pass
-        # Direct approach:
-        for child in self.findChildren(QFrame, 'editor_panel'):
-            pass
-        self._ed_desc.parent().setVisible(visible)
+        self._actions_frame.setVisible(visible)
         self._hint_lbl.setVisible(not visible)
         self._save_btn.setEnabled(visible)
         self._apply_btn.setEnabled(visible)
-        self._del_btn.setEnabled(visible and self._current_preset is not None
-                                 and self._current_preset.get('id', 0) > 0)
+        self._del_btn.setEnabled(
+            visible
+            and self._current_preset is not None
+            and self._current_preset.get('id', 0) > 0
+        )
 
     # ── Загрузка списка ───────────────────────────────────────────────
     def _load_presets(self):
@@ -770,8 +770,11 @@ class PresetsPage(BasePage):
             else:
                 new_id = db.add_preset(name, data, desc)
                 if new_id is None:
-                    # Имя занято — добавляем суффикс
-                    db.add_preset(f'{name} (2)', data, desc)
+                    # Имя занято — ищем свободный суффикс (N)
+                    i = 2
+                    while db.preset_name_exists(f'{name} ({i})'):
+                        i += 1
+                    db.add_preset(f'{name} ({i})', data, desc)
             self._unsaved = False
             self._unsaved_dot.hide()
             self._load_presets()

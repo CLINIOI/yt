@@ -297,15 +297,15 @@ def sanitize_dirname(name: str) -> str:
     return re.sub(r'[\/:*?"<>|]', "_", name).strip()
 
 
-def load_download_dir(channel_title: str) -> str:
-    try:
-        with open(CONFIG_PATH, encoding="utf-8") as fh:
-            cfg = json.load(fh)
-        base = cfg.get("paths", {}).get("downloads", "./downloads")
-    except Exception:
-        base = "./downloads"
-    base = os.path.join(os.path.dirname(CONFIG_PATH), base)
-    return os.path.join(base, sanitize_dirname(channel_title or "unknown"))
+def load_download_dir(channel_title: str, channel_id: int | None = None) -> str:
+    """
+    Возвращает папку для сохранения видео канала. Тонкая обёртка над
+    ``utils.resolve_download_dir`` — оставлена для обратной совместимости
+    с существующими импортами. Новый код должен импортировать резолвер
+    из ``utils`` напрямую.
+    """
+    from utils import resolve_download_dir
+    return resolve_download_dir(channel_title, channel_id)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -362,6 +362,13 @@ class FetchChannelWorker(QThread):
             if self.tiktok_url is not None:
                 _upd["tiktok_url"] = self.tiktok_url
             db.update_channel(self.channel_id, **_upd)
+
+        # ── 2.1. Упорядочиваем привязку TikTok (если указан handle) ──
+        if self.tiktok_handle and self.channel_id:
+            try:
+                db.ensure_tiktok_link(self.channel_id, self.tiktok_handle)
+            except Exception as e:
+                log.warning("ensure_tiktok_link failed: %s", e)
 
         # ── 3. Список видео ──
         limit_info = f" (до {self.video_limit})" if self.video_limit > 0 else " (все видео)"
@@ -428,7 +435,7 @@ class AddChannelDialog(QDialog):
         lay.addWidget(self.url_input)
         lay.addSpacing(14)
 
-        hint_tt = QLabel("TikTok аккаунт (обязательно)")
+        hint_tt = QLabel("TikTok аккаунт (необязательно)")
         hint_tt.setObjectName("dlg_hint")
         lay.addWidget(hint_tt)
         lay.addSpacing(6)
@@ -1086,7 +1093,8 @@ class ChannelsPage(QWidget):
         if not ch:
             return
 
-        output_dir = load_download_dir(ch.get("title", "unknown"))
+        output_dir = load_download_dir(ch.get("title", "unknown"),
+                                       channel_id=self._selected_channel_id)
         table  = self._video_table
         queued = 0
 

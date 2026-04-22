@@ -16,10 +16,11 @@ from enum import Enum
 
 from PyQt6.QtWidgets import (
     QWidget, QFrame, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QTreeWidget, QTreeWidgetItem,
+    QLabel, QLineEdit, QPushButton, QTreeWidget, QTreeWidgetItem,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QSplitter, QMenu, QAbstractItemView, QSizePolicy,
     QProgressBar, QScrollArea, QApplication, QMessageBox,
+    QTabWidget,
 )
 from PyQt6.QtCore import (
     Qt, QThread, pyqtSignal, QTimer,
@@ -524,6 +525,31 @@ def probe_resolution(path: str) -> str:
         return ''
 
 
+def _format_duration(seconds: float) -> str:
+    """H:MM:SS или M:SS."""
+    try:
+        s = int(float(seconds) or 0)
+    except (TypeError, ValueError):
+        return ''
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+
+
+def _lookup_duration_in_db(path: str) -> float:
+    """Ищет длительность видео по file_path в таблице videos. 0.0 если нет."""
+    try:
+        row = db.conn.execute(
+            "SELECT duration FROM videos WHERE file_path = ? LIMIT 1",
+            (path,),
+        ).fetchone()
+        if row:
+            return float(row["duration"] or 0.0)
+    except Exception:
+        pass
+    return 0.0
+
+
 class _NumItem(QTableWidgetItem):
     def __lt__(self, other) -> bool:
         a = self.data(Qt.ItemDataRole.UserRole) or 0
@@ -815,6 +841,16 @@ class FileTableWidget(QFrame):
         self._table.hide()
         lay.addWidget(self._table, stretch=1)
 
+    def filter_rows(self, query: str):
+        """Скрывает строки, которые не матчат подстроку по имени файла."""
+        q = (query or "").strip().lower()
+        for r in range(self._table.rowCount()):
+            it = self._table.item(r, self.COL_NAME)
+            if not it:
+                continue
+            name = (it.text() or "").lower()
+            self._table.setRowHidden(r, bool(q) and q not in name)
+
     # ── Загрузка папки ─────────────────────────────────────────────────
 
     def load_folder(self, path: str):
@@ -861,15 +897,24 @@ class FileTableWidget(QFrame):
             name_item.setData(Qt.ItemDataRole.UserRole, entry.path)
             self._table.setItem(row, self.COL_NAME, name_item)
 
-            # 1 — Длина (заглушка для видео; числовая сортировка)
+            # 1 — Длина видео. Ячейка заполнится в _on_duration_ready
+            # (фоновый VideoDurationWorker через ffprobe). Для корректной
+            # сортировки используется _NumItem c числовым UserRole.
             dur_item = _NumItem('')
             dur_item.setData(Qt.ItemDataRole.UserRole, 0)
             dur_item.setForeground(QColor('#5a5957'))
             dur_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
             if ext in VIDEO_EXTS:
-                dur_item.setText('...')
-                video_paths.append(entry.path)
-                self._path_to_row[entry.path] = row
+                # Сначала пробуем достать duration из БД (быстрее ffprobe);
+                # если нет — отдадим воркеру.
+                db_dur = _lookup_duration_in_db(entry.path)
+                if db_dur and db_dur > 0:
+                    dur_item.setText(_format_duration(db_dur))
+                    dur_item.setData(Qt.ItemDataRole.UserRole, float(db_dur))
+                else:
+                    dur_item.setText('...')
+                    video_paths.append(entry.path)
+                    self._path_to_row[entry.path] = row
             self._table.setItem(row, self.COL_DUR, dur_item)
 
             # 2 — Размер (числовая сортировка по байтам)
@@ -1029,12 +1074,554 @@ class FileTableWidget(QFrame):
 
 
 
+class FolderNavigatorTable(QFrame):
+    """Таблица-навигатор: показывает и папки, и файлы, поддерживает drill-in
+    по двойному клику и рекурсивное сканирование.
+
+    Колонки: Тип | Имя | Размер | Длительность | Дата | Формат [| Путь].
+    Папки всегда сверху (через сортировочный ключ в колонке «Тип»).
+    """
+
+    file_selected  = pyqtSignal(str)
+    folder_entered = pyqtSignal(str)   # путь новой папки (двойной клик)
+
+    COL_TYPE = 0
+    COL_NAME = 1
+    COL_SIZE = 2
+    COL_DUR  = 3
+    COL_DATE = 4
+    COL_FMT  = 5
+    COL_PATH = 6  # только в рекурсивном режиме
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._current_path = ''
+        self._recursive = False
+        self._dur_worker: VideoDurationWorker = None
+        self._build()
+
+    def _build(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        self._empty = QLabel('\n📭\n\nПапка пуста')
+        self._empty.setObjectName('empty_lbl')
+        self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self._empty)
+
+        self._table = QTableWidget()
+        self._table.setObjectName('file_table')
+        self._table.setColumnCount(6)
+        self._table.setHorizontalHeaderLabels(
+            ['ТИП', 'ИМЯ', 'РАЗМЕР', 'ДЛИНА', 'ДАТА', 'ФОРМАТ'])
+
+        hdr = self._table.horizontalHeader()
+        hdr.setSectionResizeMode(self.COL_TYPE, QHeaderView.ResizeMode.Fixed)
+        hdr.setSectionResizeMode(self.COL_NAME, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(self.COL_SIZE, QHeaderView.ResizeMode.Fixed)
+        hdr.setSectionResizeMode(self.COL_DUR,  QHeaderView.ResizeMode.Fixed)
+        hdr.setSectionResizeMode(self.COL_DATE, QHeaderView.ResizeMode.Fixed)
+        hdr.setSectionResizeMode(self.COL_FMT,  QHeaderView.ResizeMode.Fixed)
+        hdr.setSortIndicatorShown(True)
+        hdr.setSortIndicator(self.COL_TYPE, Qt.SortOrder.AscendingOrder)
+
+        self._table.setColumnWidth(self.COL_TYPE, 52)
+        self._table.setColumnWidth(self.COL_SIZE, 92)
+        self._table.setColumnWidth(self.COL_DUR,  80)
+        self._table.setColumnWidth(self.COL_DATE, 140)
+        self._table.setColumnWidth(self.COL_FMT,  70)
+
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setShowGrid(False)
+        self._table.setAlternatingRowColors(False)
+        self._table.setSortingEnabled(True)
+        self._table.verticalHeader().setDefaultSectionSize(32)
+        self._table.doubleClicked.connect(self._on_double_click)
+        self._table.itemSelectionChanged.connect(self._on_selection_changed)
+        self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._show_context_menu)
+        self._table.hide()
+        lay.addWidget(self._table, 1)
+
+    # ── Загрузка ─────────────────────────────────────────────────────
+
+    def set_recursive(self, on: bool):
+        self._recursive = bool(on)
+        if self._recursive and self._table.columnCount() == 6:
+            self._table.setColumnCount(7)
+            self._table.setHorizontalHeaderLabels(
+                ['ТИП', 'ИМЯ', 'РАЗМЕР', 'ДЛИНА', 'ДАТА', 'ФОРМАТ', 'ПУТЬ'])
+            self._table.horizontalHeader().setSectionResizeMode(
+                self.COL_PATH, QHeaderView.ResizeMode.Stretch)
+        elif not self._recursive and self._table.columnCount() == 7:
+            self._table.setColumnCount(6)
+            self._table.setHorizontalHeaderLabels(
+                ['ТИП', 'ИМЯ', 'РАЗМЕР', 'ДЛИНА', 'ДАТА', 'ФОРМАТ'])
+        if self._current_path:
+            self.load_folder(self._current_path)
+
+    def load_folder(self, path: str):
+        self._current_path = path
+        if self._dur_worker and self._dur_worker.isRunning():
+            self._dur_worker.stop()
+
+        if not os.path.isdir(path):
+            self._show_empty(f'⚠\n\nПапка не найдена:\n{path}')
+            return
+
+        entries: list[dict] = []
+        try:
+            if self._recursive:
+                for dirpath, _dnames, fnames in os.walk(path):
+                    for fn in fnames:
+                        full = os.path.join(dirpath, fn)
+                        try:
+                            st = os.stat(full)
+                        except OSError:
+                            continue
+                        entries.append({
+                            'is_dir': False, 'name': fn, 'path': full,
+                            'size': st.st_size, 'mtime': st.st_mtime,
+                        })
+            else:
+                for e in os.scandir(path):
+                    try:
+                        st = e.stat()
+                    except OSError:
+                        continue
+                    if e.is_dir():
+                        entries.append({
+                            'is_dir': True, 'name': e.name, 'path': e.path,
+                            'size': _folder_size(e.path), 'mtime': st.st_mtime,
+                        })
+                    elif e.is_file():
+                        entries.append({
+                            'is_dir': False, 'name': e.name, 'path': e.path,
+                            'size': st.st_size, 'mtime': st.st_mtime,
+                        })
+        except PermissionError:
+            pass
+
+        if not entries:
+            self._show_empty('📭\n\nПапка пуста')
+            return
+
+        self._empty.hide()
+        self._table.show()
+        self._table.setSortingEnabled(False)
+        self._table.setRowCount(0)
+
+        video_paths: list[tuple[str, int]] = []  # (path, row)
+
+        for ent in entries:
+            row = self._table.rowCount()
+            self._table.insertRow(row)
+            is_dir = ent['is_dir']
+            name   = ent['name']
+            ext    = '' if is_dir else os.path.splitext(name)[1].lower()
+            icon   = '📁' if is_dir else EXT_ICONS.get(ext, '📄')
+
+            # Тип (сортировочный ключ: 0=папка, 1=файл — папки сверху).
+            type_item = _NumItem(icon)
+            type_item.setData(Qt.ItemDataRole.UserRole, 0 if is_dir else 1)
+            type_item.setTextAlignment(
+                Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+            self._table.setItem(row, self.COL_TYPE, type_item)
+
+            # Имя
+            name_item = QTableWidgetItem(name)
+            name_item.setData(Qt.ItemDataRole.UserRole, ent['path'])
+            name_item.setData(Qt.ItemDataRole.UserRole + 1,
+                              'dir' if is_dir else 'file')
+            self._table.setItem(row, self.COL_NAME, name_item)
+
+            # Размер
+            size_item = _NumItem(human_size(ent['size']))
+            size_item.setData(Qt.ItemDataRole.UserRole, ent['size'])
+            size_item.setForeground(QColor('#797876'))
+            size_item.setTextAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self._table.setItem(row, self.COL_SIZE, size_item)
+
+            # Длительность (только для видео)
+            dur_item = _NumItem('')
+            dur_item.setData(Qt.ItemDataRole.UserRole, 0)
+            dur_item.setForeground(QColor('#5a5957'))
+            dur_item.setTextAlignment(
+                Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+            if not is_dir and ext in VIDEO_EXTS:
+                db_dur = _lookup_duration_in_db(ent['path'])
+                if db_dur and db_dur > 0:
+                    dur_item.setText(_format_duration(db_dur))
+                    dur_item.setData(Qt.ItemDataRole.UserRole, float(db_dur))
+                else:
+                    dur_item.setText('...')
+                    video_paths.append((ent['path'], row))
+            self._table.setItem(row, self.COL_DUR, dur_item)
+
+            # Дата
+            try:
+                date_str = datetime.fromtimestamp(ent['mtime']).strftime(
+                    '%Y-%m-%d  %H:%M')
+            except (OSError, ValueError):
+                date_str = '—'
+            date_item = QTableWidgetItem(date_str)
+            date_item.setData(Qt.ItemDataRole.UserRole, ent['mtime'])
+            date_item.setForeground(QColor('#5a5957'))
+            date_item.setTextAlignment(
+                Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+            self._table.setItem(row, self.COL_DATE, date_item)
+
+            # Формат
+            if is_dir:
+                fmt_text = '—'
+            else:
+                fmt_text = ext.lstrip('.') if ext else '—'
+            fmt_item = QTableWidgetItem(fmt_text)
+            fmt_item.setForeground(QColor('#3a3937'))
+            fmt_item.setTextAlignment(
+                Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+            self._table.setItem(row, self.COL_FMT, fmt_item)
+
+            # Относительный путь (рекурсивный режим)
+            if self._recursive and self._table.columnCount() > self.COL_PATH:
+                try:
+                    rel = os.path.relpath(os.path.dirname(ent['path']), path)
+                except ValueError:
+                    rel = ''
+                rel_item = QTableWidgetItem(rel or '.')
+                rel_item.setForeground(QColor('#5a5957'))
+                self._table.setItem(row, self.COL_PATH, rel_item)
+
+        self._table.setSortingEnabled(True)
+        hdr = self._table.horizontalHeader()
+        self._table.sortByColumn(hdr.sortIndicatorSection(),
+                                 hdr.sortIndicatorOrder())
+
+        if video_paths:
+            paths_only = [p for p, _ in video_paths]
+            self._dur_worker = VideoDurationWorker(paths_only)
+            self._dur_worker.duration_ready.connect(self._on_duration_ready)
+            self._dur_worker.start()
+
+    def _show_empty(self, msg: str):
+        self._empty.setText(f'\n{msg}')
+        self._empty.show()
+        self._table.hide()
+
+    def _on_duration_ready(self, path: str, seconds: float):
+        for row in range(self._table.rowCount()):
+            item = self._table.item(row, self.COL_NAME)
+            if item and item.data(Qt.ItemDataRole.UserRole) == path:
+                dur_item = self._table.item(row, self.COL_DUR)
+                if dur_item:
+                    self._table.setSortingEnabled(False)
+                    dur_item.setText(fmt_duration(seconds))
+                    dur_item.setData(Qt.ItemDataRole.UserRole, int(seconds))
+                    self._table.setSortingEnabled(True)
+                break
+
+    # ── Взаимодействие ───────────────────────────────────────────────
+
+    def filter_rows(self, query: str):
+        q = (query or '').strip().lower()
+        for r in range(self._table.rowCount()):
+            it = self._table.item(r, self.COL_NAME)
+            if not it:
+                continue
+            name = (it.text() or '').lower()
+            self._table.setRowHidden(r, bool(q) and q not in name)
+
+    def _selected(self) -> tuple[str, str]:
+        """Возвращает (path, kind) выбранной строки. kind = 'dir' | 'file'."""
+        row = self._table.currentRow()
+        if row < 0:
+            return '', ''
+        item = self._table.item(row, self.COL_NAME)
+        if not item:
+            return '', ''
+        return (item.data(Qt.ItemDataRole.UserRole) or '',
+                item.data(Qt.ItemDataRole.UserRole + 1) or '')
+
+    def _on_selection_changed(self):
+        path, kind = self._selected()
+        if kind == 'file':
+            self.file_selected.emit(path)
+        else:
+            self.file_selected.emit('')
+
+    def _on_double_click(self):
+        path, kind = self._selected()
+        if not path:
+            return
+        if kind == 'dir':
+            self.folder_entered.emit(path)
+        elif kind == 'file' and os.path.isfile(path):
+            open_with_player(path)
+
+    def _show_context_menu(self, pos):
+        path, kind = self._selected()
+        if not path:
+            return
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            'QMenu{background:#201f1d;color:#cdccca;border:1px solid #393836;}'
+            'QMenu::item{padding:6px 20px;}'
+            'QMenu::item:selected{background:#313b3b;color:#4f98a3;}'
+            'QMenu::separator{background:#2d2c2a;height:1px;margin:4px 0;}'
+        )
+        if kind == 'dir':
+            a = menu.addAction('📂  Открыть в проводнике')
+            a.triggered.connect(lambda: open_in_explorer(path))
+            a2 = menu.addAction('➡  Войти')
+            a2.triggered.connect(lambda: self.folder_entered.emit(path))
+        else:
+            ext = os.path.splitext(path)[1].lower()
+            if ext in VIDEO_EXTS:
+                a = menu.addAction('▶  Открыть в плеере')
+                a.triggered.connect(lambda: open_with_player(path))
+            a2 = menu.addAction('📂  Показать в проводнике')
+            a2.triggered.connect(lambda: open_in_explorer(path))
+            menu.addSeparator()
+            a3 = menu.addAction('📋  Копировать путь')
+            a3.triggered.connect(
+                lambda: QApplication.clipboard().setText(path))
+        menu.exec(QCursor.pos())
+
+    # ── Статистика (для статус-бара) ─────────────────────────────────
+
+    def file_count(self) -> int:
+        cnt = 0
+        for r in range(self._table.rowCount()):
+            kind_item = self._table.item(r, self.COL_NAME)
+            if kind_item and kind_item.data(Qt.ItemDataRole.UserRole + 1) == 'file':
+                cnt += 1
+        return cnt
+
+    def total_size(self) -> int:
+        total = 0
+        for r in range(self._table.rowCount()):
+            kind_item = self._table.item(r, self.COL_NAME)
+            if kind_item and kind_item.data(Qt.ItemDataRole.UserRole + 1) == 'file':
+                s = self._table.item(r, self.COL_SIZE)
+                if s:
+                    total += s.data(Qt.ItemDataRole.UserRole) or 0
+        return total
+
+
+def _folder_size(path: str, limit_entries: int = 5000) -> int:
+    """Быстрая (неглубокая) оценка размера папки. Ограничиваем общее число
+    сканируемых файлов, чтобы при большом дереве не подвешивать UI."""
+    total = 0
+    count = 0
+    try:
+        for _dp, _dn, fns in os.walk(path):
+            for fn in fns:
+                count += 1
+                if count > limit_entries:
+                    return total
+                try:
+                    total += os.path.getsize(os.path.join(_dp, fn))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total
+
+
+class BreadcrumbBar(QFrame):
+    """Хлебные крошки: сегменты-кнопки + «↑ вверх». Клик → переход."""
+
+    crumb_clicked = pyqtSignal(str)  # путь сегмента
+    up_clicked    = pyqtSignal()
+
+    def __init__(self, root_path: str, root_label: str, parent=None):
+        super().__init__(parent)
+        self._root = os.path.normpath(root_path)
+        self._root_label = root_label
+        self._layout = QHBoxLayout(self)
+        self._layout.setContentsMargins(4, 4, 4, 4)
+        self._layout.setSpacing(2)
+        self._current = self._root
+        self._render()
+
+    def _render(self):
+        while self._layout.count():
+            item = self._layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+        up = QPushButton('↑')
+        up.setFixedSize(28, 24)
+        up.setFlat(True)
+        up.setToolTip('На уровень выше')
+        up.clicked.connect(self.up_clicked.emit)
+        self._layout.addWidget(up)
+
+        # Сегменты от корня
+        segments: list[tuple[str, str]] = [(self._root, self._root_label)]
+        rel = os.path.relpath(self._current, self._root)
+        if rel and rel != '.':
+            acc = self._root
+            for part in rel.replace('\\', '/').split('/'):
+                if not part or part == '..':
+                    continue
+                acc = os.path.join(acc, part)
+                segments.append((acc, part))
+
+        for i, (path, label) in enumerate(segments):
+            btn = QPushButton(label)
+            btn.setFlat(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                'QPushButton{color:#cdccca;background:transparent;'
+                'border:none;padding:2px 6px;font-size:12px;}'
+                'QPushButton:hover{color:#4f98a3;}'
+            )
+            btn.clicked.connect(
+                lambda _c=False, p=path: self.crumb_clicked.emit(p))
+            self._layout.addWidget(btn)
+            if i < len(segments) - 1:
+                sep = QLabel('/')
+                sep.setStyleSheet('color:#3a3937;')
+                self._layout.addWidget(sep)
+        self._layout.addStretch()
+
+    def set_current(self, path: str):
+        self._current = os.path.normpath(path)
+        self._render()
+
+    def current(self) -> str:
+        return self._current
+
+    def root(self) -> str:
+        return self._root
+
+
+class FolderTabPage(QWidget):
+    """Одна вкладка страницы «Папки» — проводник с хлебными крошками,
+    drill-in в подпапки и опциональным рекурсивным поиском."""
+
+    def __init__(self, title: str, folder_path: str, parent=None):
+        super().__init__(parent)
+        self._root = os.path.normpath(folder_path)
+        self._title = title
+        try:
+            os.makedirs(self._root, exist_ok=True)
+        except Exception:
+            pass
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(6, 6, 6, 6)
+        lay.setSpacing(6)
+
+        # Верхняя панель: крошки + кнопки
+        head = QHBoxLayout()
+        head.setSpacing(6)
+        self._crumbs = BreadcrumbBar(self._root, title)
+        self._crumbs.crumb_clicked.connect(self._navigate)
+        self._crumbs.up_clicked.connect(self._go_up)
+        head.addWidget(self._crumbs, 1)
+
+        self._open_btn = QPushButton('📂 В системе')
+        self._open_btn.setObjectName('tool_btn')
+        self._open_btn.setToolTip('Открыть текущую папку в проводнике')
+        self._open_btn.clicked.connect(self._open_current)
+        head.addWidget(self._open_btn)
+
+        self._refresh_btn = QPushButton('🔄')
+        self._refresh_btn.setObjectName('tool_btn')
+        self._refresh_btn.setFixedWidth(36)
+        self._refresh_btn.clicked.connect(self.refresh)
+        head.addWidget(self._refresh_btn)
+        lay.addLayout(head)
+
+        # Панель поиска + рекурсивный чекбокс
+        from PyQt6.QtWidgets import QCheckBox
+        tools = QHBoxLayout()
+        tools.setSpacing(6)
+        self._search = QLineEdit()
+        self._search.setPlaceholderText('Поиск по имени в текущем уровне…')
+        self._search.setClearButtonEnabled(True)
+        tools.addWidget(self._search, 1)
+        self._rec_chk = QCheckBox('Искать во всех подпапках')
+        self._rec_chk.setToolTip(
+            'Показать файлы из всех вложенных папок в виде плоского списка')
+        tools.addWidget(self._rec_chk)
+        lay.addLayout(tools)
+
+        # Содержимое: таблица + превью
+        split = QSplitter(Qt.Orientation.Horizontal)
+        split.setChildrenCollapsible(False)
+        self.table = FolderNavigatorTable()
+        split.addWidget(self.table)
+        self.preview = VideoPreviewPanel()
+        split.addWidget(self.preview)
+        split.setSizes([720, 280])
+        lay.addWidget(split, 1)
+
+        self.table.file_selected.connect(self.preview.show_file)
+        self.table.folder_entered.connect(self._navigate)
+        self._search.textChanged.connect(self.table.filter_rows)
+        self._rec_chk.toggled.connect(self._on_recursive_toggled)
+
+    def _navigate(self, path: str):
+        if not path:
+            return
+        norm = os.path.normpath(path)
+        # Защита от выхода выше корня
+        root = os.path.normpath(self._root)
+        try:
+            common = os.path.commonpath([norm, root])
+        except ValueError:
+            common = ''
+        if common != root:
+            norm = root
+        self._crumbs.set_current(norm)
+        self._rec_chk.setChecked(False)  # при навигации сбрасываем рекурсию
+        self.table.load_folder(norm)
+        q = self._search.text()
+        if q:
+            self.table.filter_rows(q)
+
+    def _go_up(self):
+        cur = self._crumbs.current()
+        if os.path.normpath(cur) == os.path.normpath(self._root):
+            return
+        self._navigate(os.path.dirname(cur))
+
+    def _open_current(self):
+        cur = self._crumbs.current()
+        if cur:
+            open_in_explorer(cur)
+
+    def _on_recursive_toggled(self, on: bool):
+        self.table.set_recursive(on)
+
+    def refresh(self):
+        cur = self._crumbs.current() or self._root
+        if not os.path.isdir(cur):
+            try:
+                os.makedirs(cur, exist_ok=True)
+            except Exception:
+                pass
+        self.table.load_folder(cur)
+        q = self._search.text()
+        if q:
+            self.table.filter_rows(q)
+
+
 class FoldersPage(BasePage):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._config_paths = load_config_paths()
         self._size_worker: FolderSizeWorker = None
         self._watcher = QFileSystemWatcher(self)
+        self._tab_pages: dict[str, FolderTabPage] = {}
         self._build_ui()
         self.setStyleSheet(PAGE_STYLE)
         QTimer.singleShot(200, self._initial_load)
@@ -1067,53 +1654,59 @@ class FoldersPage(BasePage):
 
         return bar
 
-    def _build_body(self) -> QSplitter:
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setHandleWidth(1)
-        splitter.setChildrenCollapsible(False)
-
-        # ── Левая панель: дерево + диск ──
-        left = QFrame()
-        left.setObjectName('left_panel')
-        left.setMinimumWidth(260)
-        left.setMaximumWidth(340)
-        left_lay = QVBoxLayout(left)
-        left_lay.setContentsMargins(10, 10, 10, 10)
-        left_lay.setSpacing(8)
-
-        tree_lbl = QLabel('СТРУКТУРА ПРОЕКТА')
-        tree_lbl.setObjectName('tree_section')
-        left_lay.addWidget(tree_lbl)
-
-        self._tree = FolderTreeWidget()
-        self._tree.folder_selected.connect(self._on_folder_selected)
-        left_lay.addWidget(self._tree, stretch=1)
-
-        # Использование диска
-        disk_lbl = QLabel('ДИСК')
-        disk_lbl.setObjectName('tree_section')
-        left_lay.addWidget(disk_lbl)
-
+    def _build_body(self) -> QWidget:
+        """6 вкладок — по одной на каждую папку проекта.
+        Каждая вкладка: поиск + сортируемая таблица + превью."""
         base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        dl_raw = self._config_paths.get('downloads', './downloads')
-        dl_abs = os.path.join(base, dl_raw) if not os.path.isabs(dl_raw) else dl_raw
+        try:
+            from utils import (
+                DIR_DOWNLOADS, DIR_PROCESSED, DIR_CLIPS,
+                DIR_BACKGROUNDS, DIR_BANNERS, DIR_RETENTION,
+            )
+        except Exception:
+            # Фоллбэк, если утилиты ещё не обновлены
+            DIR_DOWNLOADS = "загрузки"
+            DIR_PROCESSED = "обработанное"
+            DIR_CLIPS = "нарезки"
+            DIR_BACKGROUNDS = "фон"
+            DIR_BANNERS = "баннер"
+            DIR_RETENTION = "удержание"
+
+        specs = [
+            ("Загрузки",      DIR_DOWNLOADS),
+            ("Обработанное",  DIR_PROCESSED),
+            ("Нарезки",       DIR_CLIPS),
+            ("Фоны",          DIR_BACKGROUNDS),
+            ("Баннеры",       DIR_BANNERS),
+            ("Удержание",     DIR_RETENTION),
+        ]
+
+        self._tabs = QTabWidget()
+        self._tabs.setDocumentMode(True)
+        for title, dir_const in specs:
+            abs_path = os.path.join(base, dir_const)
+            page = FolderTabPage(title, abs_path, self)
+            self._tabs.addTab(page, title)
+            self._tab_pages[dir_const] = page
+        self._tabs.currentChanged.connect(self._on_tab_changed)
+
+        # Левая панель с использованием диска убрана — теперь её место
+        # занимает статус-бар снизу. Но оставим DiskUsageWidget под
+        # таблицей загрузок для наглядности.
+        wrapper = QWidget()
+        wlay = QVBoxLayout(wrapper)
+        wlay.setContentsMargins(0, 0, 0, 0)
+        wlay.addWidget(self._tabs, 1)
+
+        dl_abs = os.path.join(base, DIR_DOWNLOADS)
         self._disk_widget = DiskUsageWidget(dl_abs)
-        left_lay.addWidget(self._disk_widget)
+        wlay.addWidget(self._disk_widget)
+        return wrapper
 
-        splitter.addWidget(left)
-
-        # ── Средняя панель: таблица файлов ──
-        self._file_table = FileTableWidget()
-        self._file_table.setMinimumWidth(380)
-        self._file_table.file_selected.connect(self._on_file_selected)
-        splitter.addWidget(self._file_table)
-
-        # ── Правая панель: предпросмотр ──
-        self._preview = VideoPreviewPanel()
-        splitter.addWidget(self._preview)
-
-        splitter.setSizes([280, 620, 260])
-        return splitter
+    def _on_tab_changed(self, idx: int):
+        page = self._tabs.widget(idx)
+        if isinstance(page, FolderTabPage):
+            page.refresh()
 
     def _build_status_bar(self) -> QFrame:
         bar = QFrame()
@@ -1141,60 +1734,51 @@ class FoldersPage(BasePage):
     # ── Загрузка и обновление ─────────────────────────────────────────
 
     def _initial_load(self):
-        self._tree.load(self._config_paths)
-        self._start_size_worker()
+        self._full_refresh()
         self._setup_watcher()
 
     def _full_refresh(self):
         self._config_paths = load_config_paths()
-        self._tree.load(self._config_paths)
-        self._start_size_worker()
+        for p in self._tab_pages.values():
+            p.refresh()
         self._disk_widget.refresh()
-        if self._file_table._current_path:
-            self._file_table.load_folder(self._file_table._current_path)
+        self._start_size_worker()
+        self._update_status()
 
     def _start_size_worker(self):
         if self._size_worker and self._size_worker.isRunning():
             return
-        base  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         paths = []
-        for raw in self._config_paths.values():
-            abs_p = os.path.join(base, raw) if not os.path.isabs(raw) else raw
+        for dir_const in self._tab_pages.keys():
+            abs_p = os.path.join(base, dir_const)
             if os.path.isdir(abs_p):
                 paths.append(abs_p)
         if not paths:
             return
         self._size_worker = FolderSizeWorker(paths)
-        self._size_worker.size_calculated.connect(self._tree.update_size)
         self._size_worker.start()
 
     def _setup_watcher(self):
         base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        for raw in self._config_paths.values():
-            abs_p = os.path.join(base, raw) if not os.path.isabs(raw) else raw
+        for dir_const in self._tab_pages.keys():
+            abs_p = os.path.join(base, dir_const)
             if os.path.isdir(abs_p) and abs_p not in self._watcher.directories():
                 self._watcher.addPath(abs_p)
         self._watcher.directoryChanged.connect(self._on_dir_changed)
 
-    def _on_file_selected(self, path: str):
-        self._preview.show_file(path)
-
-    def _on_folder_selected(self, path: str):
-        self._file_table.load_folder(path)
-        self._update_status()
-        p = path
-        self._status_path.setText(
-            p if len(p) <= 60 else '...' + p[-57:]
-        )
-
     def _on_dir_changed(self, path: str):
-        if path == self._file_table._current_path:
-            self._file_table.load_folder(path)
-            self._update_status()
+        for page in self._tab_pages.values():
+            if getattr(page.table, '_current_path', '') == path:
+                page.table.load_folder(path)
 
     def _update_status(self):
-        n    = self._file_table.file_count()
-        size = self._file_table.total_size()
-        noun = 'файл' if n == 1 else ('файла' if 2 <= n <= 4 else 'файлов')
-        self._status_files.setText(f'{n} {noun}')
-        self._status_size.setText(human_size(size) if size > 0 else '')
+        total_files = 0
+        total_size = 0
+        for page in self._tab_pages.values():
+            total_files += page.table.file_count()
+            total_size += page.table.total_size()
+        noun = 'файл' if total_files == 1 else (
+            'файла' if 2 <= total_files <= 4 else 'файлов')
+        self._status_files.setText(f'{total_files} {noun}')
+        self._status_size.setText(human_size(total_size) if total_size > 0 else '')

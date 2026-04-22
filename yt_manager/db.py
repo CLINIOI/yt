@@ -6,7 +6,8 @@ import sqlite3
 import threading
 import os
 import json
-from datetime import datetime
+import re
+from datetime import datetime, time, timedelta
 
 
 # Определяем путь к БД строго относительно этого файла
@@ -185,7 +186,264 @@ class Database:
             )
         """)
 
+        # Миграция: updated_at для пресетов
+        try:
+            cur.execute("ALTER TABLE presets ADD COLUMN updated_at TIMESTAMP")
+            self._commit()
+        except Exception:
+            pass
+
+        # ── TikTok каналы ───────────────────────────────────────────
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS tiktok_channels (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                handle          TEXT    NOT NULL UNIQUE,
+                display_name    TEXT,
+                avatar_url      TEXT,
+                hashtags_json   TEXT    DEFAULT '[]',
+                schedule_json   TEXT    DEFAULT '[]',
+                clip_min_buffer INTEGER DEFAULT 10,
+                enabled         INTEGER DEFAULT 1,
+                created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # ── Связь TikTok ↔ YouTube (N:M) ────────────────────────────
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS tiktok_youtube_link (
+                tiktok_id  INTEGER NOT NULL REFERENCES tiktok_channels(id) ON DELETE CASCADE,
+                youtube_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+                PRIMARY KEY (tiktok_id, youtube_id)
+            )
+        """)
+
+        # ── Готовые клипы ───────────────────────────────────────────
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS clips (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                tiktok_id       INTEGER NOT NULL REFERENCES tiktok_channels(id) ON DELETE CASCADE,
+                source_video_id INTEGER REFERENCES videos(id) ON DELETE SET NULL,
+                file_path       TEXT    NOT NULL,
+                duration        REAL,
+                status          TEXT    DEFAULT 'ready',
+                                 -- ready | published | removed
+                generated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                published_at    TIMESTAMP
+            )
+        """)
+
+        # ── Скрипты публикации ──────────────────────────────────────
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS publish_scripts (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                tiktok_id       INTEGER NOT NULL REFERENCES tiktok_channels(id) ON DELETE CASCADE,
+                clip_id         INTEGER REFERENCES clips(id) ON DELETE CASCADE,
+                title           TEXT,
+                file_path       TEXT,
+                hashtags        TEXT,
+                scheduled_at    TIMESTAMP,
+                caption         TEXT,
+                status          TEXT    DEFAULT 'draft',
+                                 -- draft | marked | done
+                created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # ── Миграция: перенос channels.tiktok_handle → tiktok_channels
+        #    + tiktok_youtube_link. Идемпотентно (INSERT OR IGNORE). ──
+        self._migrate_tiktok_links_from_channels(cur)
+
+        # ── Настройки автоматизации (1 к 1 с YouTube-каналом) ───────
+        # Миграция: если таблица уже существует со старой схемой (tiktok_id)
+        # — переносим записи на все привязанные YouTube-каналы через
+        # tiktok_youtube_link, затем пересоздаём таблицу.
+        self._migrate_automation_settings(cur)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS automation_settings (
+                channel_id          INTEGER PRIMARY KEY
+                                    REFERENCES channels(id) ON DELETE CASCADE,
+                download_enabled    INTEGER DEFAULT 1,
+                min_duration_sec    INTEGER DEFAULT 300,
+                max_duration_sec    INTEGER DEFAULT 1800,
+                max_age_days        INTEGER DEFAULT 7,
+                fallback_popular    INTEGER DEFAULT 1,
+                processing_enabled  INTEGER DEFAULT 1,
+                banner_dir          TEXT,
+                retention_dir       TEXT,
+                background_dir      TEXT,
+                clip_duration_sec   INTEGER DEFAULT 30,
+                publish_enabled     INTEGER DEFAULT 1,
+                auto_active         INTEGER DEFAULT 0,
+                updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        # Миграция: auto_active для старых БД
+        try:
+            cur.execute(
+                "ALTER TABLE automation_settings ADD COLUMN auto_active INTEGER DEFAULT 0"
+            )
+            self._commit()
+        except Exception:
+            pass
+
+        # ── Приложение (ключ-значение для настроек) ─────────────────
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key         TEXT PRIMARY KEY,
+                value       TEXT,
+                updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # ── Индексы ────────────────────────────────────────────────
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_clips_tiktok ON clips(tiktok_id, status)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_scripts_tiktok ON publish_scripts(tiktok_id, status)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_videos_channel_status ON videos(channel_id, status)")
+
         self._commit()
+
+    # ─────────────────────────────────────────────────────────────────
+    # МИГРАЦИИ
+    # ─────────────────────────────────────────────────────────────────
+
+    def _migrate_tiktok_links_from_channels(self, cur) -> None:
+        """Переносит channels.tiktok_handle/tiktok_url в tiktok_channels
+        и tiktok_youtube_link. Идемпотентно (INSERT OR IGNORE).
+
+        Срабатывает при каждом старте — старые каналы с заполненной
+        колонкой tiktok_handle получают полноценную привязку, которую
+        ожидает AutomationPage.
+        """
+        try:
+            rows = cur.execute(
+                "SELECT id, tiktok_handle, tiktok_url FROM channels "
+                "WHERE tiktok_handle IS NOT NULL AND tiktok_handle != ''"
+            ).fetchall()
+        except Exception:
+            return
+
+        for row in rows:
+            ch_id = row["id"]
+            raw = (row["tiktok_handle"] or "").strip().lstrip("@")
+            if not raw:
+                continue
+            try:
+                tt = cur.execute(
+                    "SELECT id FROM tiktok_channels WHERE handle = ?", (raw,)
+                ).fetchone()
+                if tt:
+                    tt_id = tt["id"]
+                else:
+                    cur.execute(
+                        "INSERT INTO tiktok_channels(handle, display_name) "
+                        "VALUES(?, ?)", (raw, raw)
+                    )
+                    tt_id = cur.lastrowid
+                cur.execute(
+                    "INSERT OR IGNORE INTO tiktok_youtube_link "
+                    "(tiktok_id, youtube_id) VALUES(?, ?)",
+                    (int(tt_id), int(ch_id))
+                )
+            except Exception as e:
+                try:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "tiktok-link migration row id=%s skipped: %s", ch_id, e
+                    )
+                except Exception:
+                    pass
+        self.conn.commit()
+
+    def _migrate_automation_settings(self, cur) -> None:
+        """Неразрушающая миграция automation_settings: tiktok_id → channel_id.
+
+        Если таблица уже существует со старой схемой (PK = tiktok_id),
+        создаём automation_settings_new со схемой по channel_id, переносим
+        данные: для каждой старой записи тянем список привязанных
+        YouTube-каналов (tiktok_youtube_link) и копируем настройки на
+        каждый из них. Затем DROP старой и RENAME новой.
+        """
+        try:
+            info = cur.execute("PRAGMA table_info(automation_settings)").fetchall()
+        except Exception:
+            return
+        if not info:
+            return  # таблицы ещё нет — будет создана сразу в новой схеме
+        cols = [c[1] for c in info]
+        if "channel_id" in cols:
+            return  # уже мигрировано
+        if "tiktok_id" not in cols:
+            return
+
+        try:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS automation_settings_new (
+                    channel_id          INTEGER PRIMARY KEY
+                                        REFERENCES channels(id) ON DELETE CASCADE,
+                    download_enabled    INTEGER DEFAULT 1,
+                    min_duration_sec    INTEGER DEFAULT 300,
+                    max_duration_sec    INTEGER DEFAULT 1800,
+                    max_age_days        INTEGER DEFAULT 7,
+                    fallback_popular    INTEGER DEFAULT 1,
+                    processing_enabled  INTEGER DEFAULT 1,
+                    banner_dir          TEXT,
+                    retention_dir       TEXT,
+                    background_dir      TEXT,
+                    clip_duration_sec   INTEGER DEFAULT 30,
+                    publish_enabled     INTEGER DEFAULT 1,
+                    updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            rows = cur.execute("SELECT * FROM automation_settings").fetchall()
+            for row in rows:
+                d = dict(row)
+                tt_id = d.get("tiktok_id")
+                if not tt_id:
+                    continue
+                yt_ids = [r[0] for r in cur.execute(
+                    "SELECT youtube_id FROM tiktok_youtube_link WHERE tiktok_id = ?",
+                    (int(tt_id),)
+                ).fetchall()]
+                for yt_id in yt_ids:
+                    cur.execute("""
+                        INSERT OR REPLACE INTO automation_settings_new (
+                            channel_id, download_enabled, min_duration_sec,
+                            max_duration_sec, max_age_days, fallback_popular,
+                            processing_enabled, banner_dir, retention_dir,
+                            background_dir, clip_duration_sec, publish_enabled,
+                            updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        int(yt_id),
+                        int(d.get("download_enabled") or 1),
+                        int(d.get("min_duration_sec") or 300),
+                        int(d.get("max_duration_sec") or 1800),
+                        int(d.get("max_age_days") or 7),
+                        int(d.get("fallback_popular") or 1),
+                        int(d.get("processing_enabled") or 1),
+                        d.get("banner_dir"),
+                        d.get("retention_dir"),
+                        d.get("background_dir"),
+                        int(d.get("clip_duration_sec") or 30),
+                        int(d.get("publish_enabled") or 1),
+                        d.get("updated_at") or datetime.now().isoformat(),
+                    ))
+
+            cur.execute("DROP TABLE automation_settings")
+            cur.execute("ALTER TABLE automation_settings_new RENAME TO automation_settings")
+        except Exception as e:
+            try:
+                import logging
+                logging.getLogger(__name__).exception(
+                    "Миграция automation_settings не удалась: %s", e
+                )
+            except Exception:
+                pass
+            try:
+                cur.execute("DROP TABLE IF EXISTS automation_settings_new")
+            except Exception:
+                pass
 
     # ─────────────────────────────────────────────────────────────────
     # КАНАЛЫ
@@ -633,6 +891,625 @@ class Database:
             "total_videos": total,
             "by_status": {r["status"]: r["n"] for r in status_rows},
         }
+
+    # ─────────────────────────────────────────────────────────────────
+    # TIKTOK-КАНАЛЫ
+    # ─────────────────────────────────────────────────────────────────
+
+    def add_tiktok_channel(self, handle: str, display_name: str = None,
+                           avatar_url: str = None,
+                           clip_min_buffer: int = 10) -> int | None:
+        """Создаёт TikTok-канал. Возвращает id или id существующего при коллизии handle."""
+        handle = (handle or "").strip().lstrip("@")
+        if not handle:
+            return None
+        cur = self.conn.cursor()
+        try:
+            cur.execute("""
+                INSERT INTO tiktok_channels (handle, display_name, avatar_url, clip_min_buffer)
+                VALUES (?, ?, ?, ?)
+            """, (handle, display_name, avatar_url, int(clip_min_buffer or 10)))
+            self._commit()
+            return cur.lastrowid
+        except sqlite3.IntegrityError:
+            row = cur.execute(
+                "SELECT id FROM tiktok_channels WHERE handle = ?", (handle,)
+            ).fetchone()
+            return row["id"] if row else None
+
+    _WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+    @classmethod
+    def _parse_schedule(cls, raw: str | None) -> dict:
+        """Парсит schedule_json. Новый формат — dict {"mon":[...],...}.
+        Старый — плоский список; расширяется на все 7 дней."""
+        try:
+            data = json.loads(raw or "[]")
+        except Exception:
+            return {k: [] for k in cls._WEEKDAYS}
+        if isinstance(data, dict):
+            return {k: list(data.get(k, []) or []) for k in cls._WEEKDAYS}
+        if isinstance(data, list):
+            times = list(data)
+            return {k: list(times) for k in cls._WEEKDAYS}
+        return {k: [] for k in cls._WEEKDAYS}
+
+    def get_tiktok_channel(self, tiktok_id: int) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM tiktok_channels WHERE id = ?", (tiktok_id,)
+        ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["hashtags"] = json.loads(d.get("hashtags_json") or "[]")
+        d["schedule"] = self._parse_schedule(d.get("schedule_json"))
+        return d
+
+    def get_tiktok_channel_by_handle(self, handle: str) -> dict | None:
+        handle = (handle or "").strip().lstrip("@")
+        if not handle:
+            return None
+        row = self.conn.execute(
+            "SELECT * FROM tiktok_channels WHERE handle = ?", (handle,)
+        ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["hashtags"] = json.loads(d.get("hashtags_json") or "[]")
+        d["schedule"] = self._parse_schedule(d.get("schedule_json"))
+        return d
+
+    def list_tiktok_channels(self) -> list:
+        rows = self.conn.execute(
+            "SELECT * FROM tiktok_channels ORDER BY created_at DESC"
+        ).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["hashtags"] = json.loads(d.get("hashtags_json") or "[]")
+            d["schedule"] = self._parse_schedule(d.get("schedule_json"))
+            result.append(d)
+        return result
+
+    def update_tiktok_channel(self, tiktok_id: int, **kwargs) -> bool:
+        allowed = {"handle", "display_name", "avatar_url",
+                   "hashtags_json", "schedule_json",
+                   "clip_min_buffer", "enabled"}
+        fields = {k: v for k, v in kwargs.items() if k in allowed}
+        if not fields:
+            return False
+        set_clause = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values()) + [tiktok_id]
+        self.conn.execute(
+            f"UPDATE tiktok_channels SET {set_clause} WHERE id = ?", values
+        )
+        self._commit()
+        return True
+
+    def delete_tiktok_channel(self, tiktok_id: int):
+        self.conn.execute("DELETE FROM tiktok_channels WHERE id = ?", (tiktok_id,))
+        self._commit()
+
+    def set_tiktok_hashtags(self, tiktok_id: int, hashtags: list) -> bool:
+        payload = json.dumps(list(hashtags or []), ensure_ascii=False)
+        return self.update_tiktok_channel(tiktok_id, hashtags_json=payload)
+
+    def set_tiktok_schedule(self, tiktok_id: int, schedule) -> bool:
+        """Сохраняет график. Принимает dict {"mon":[...],...} или список
+        (для обратной совместимости — расширяется на все дни)."""
+        if isinstance(schedule, dict):
+            norm = {k: list(schedule.get(k, []) or []) for k in self._WEEKDAYS}
+        elif isinstance(schedule, list):
+            norm = {k: list(schedule) for k in self._WEEKDAYS}
+        else:
+            norm = {k: [] for k in self._WEEKDAYS}
+        payload = json.dumps(norm, ensure_ascii=False)
+        return self.update_tiktok_channel(tiktok_id, schedule_json=payload)
+
+    # ─────────────────────────────────────────────────────────────────
+    # СВЯЗИ TikTok ↔ YouTube
+    # ─────────────────────────────────────────────────────────────────
+
+    def ensure_tiktok_link(self, channel_id: int,
+                           tiktok_handle: str | None) -> int | None:
+        """Гарантирует запись TikTok-канала и связь с YouTube-каналом.
+
+        Нормализует handle, при необходимости создаёт запись в
+        tiktok_channels и заводит связь в tiktok_youtube_link.
+        Возвращает id TikTok-канала либо None (пустой handle).
+        """
+        if not tiktok_handle:
+            return None
+        handle = str(tiktok_handle).strip().lstrip("@")
+        if not handle:
+            return None
+        try:
+            row = self.conn.execute(
+                "SELECT id FROM tiktok_channels WHERE handle = ?", (handle,)
+            ).fetchone()
+            if row:
+                tt_id = int(row["id"])
+            else:
+                cur = self.conn.cursor()
+                cur.execute(
+                    "INSERT INTO tiktok_channels (handle, display_name) "
+                    "VALUES (?, ?)", (handle, handle)
+                )
+                tt_id = int(cur.lastrowid)
+            self.conn.execute(
+                "INSERT OR IGNORE INTO tiktok_youtube_link "
+                "(tiktok_id, youtube_id) VALUES (?, ?)",
+                (int(tt_id), int(channel_id))
+            )
+            self._commit()
+            return tt_id
+        except Exception as e:
+            try:
+                import logging
+                logging.getLogger(__name__).exception(
+                    "ensure_tiktok_link failed: %s", e
+                )
+            except Exception:
+                pass
+            return None
+
+    def link_tiktok_to_youtube(self, tiktok_id: int, youtube_id: int) -> bool:
+        try:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO tiktok_youtube_link (tiktok_id, youtube_id) VALUES (?, ?)",
+                (int(tiktok_id), int(youtube_id))
+            )
+            self._commit()
+            return True
+        except Exception:
+            return False
+
+    def unlink_tiktok_youtube(self, tiktok_id: int, youtube_id: int) -> bool:
+        self.conn.execute(
+            "DELETE FROM tiktok_youtube_link WHERE tiktok_id = ? AND youtube_id = ?",
+            (int(tiktok_id), int(youtube_id))
+        )
+        self._commit()
+        return True
+
+    def list_youtube_for_tiktok(self, tiktok_id: int) -> list:
+        rows = self.conn.execute("""
+            SELECT c.*
+            FROM channels c
+            JOIN tiktok_youtube_link l ON c.id = l.youtube_id
+            WHERE l.tiktok_id = ?
+            ORDER BY c.added_at DESC
+        """, (int(tiktok_id),)).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_tiktok_for_youtube(self, youtube_id: int) -> list:
+        rows = self.conn.execute("""
+            SELECT t.*
+            FROM tiktok_channels t
+            JOIN tiktok_youtube_link l ON t.id = l.tiktok_id
+            WHERE l.youtube_id = ?
+            ORDER BY t.created_at DESC
+        """, (int(youtube_id),)).fetchall()
+        return [dict(r) for r in rows]
+
+    # ─────────────────────────────────────────────────────────────────
+    # КЛИПЫ
+    # ─────────────────────────────────────────────────────────────────
+
+    def add_clip(self, tiktok_id: int, file_path: str,
+                 source_video_id: int = None,
+                 duration: float = None,
+                 status: str = "ready") -> int:
+        cur = self.conn.cursor()
+        cur.execute("""
+            INSERT INTO clips (tiktok_id, source_video_id, file_path, duration, status)
+            VALUES (?, ?, ?, ?, ?)
+        """, (int(tiktok_id), source_video_id, file_path, duration, status))
+        self._commit()
+        return cur.lastrowid
+
+    def list_clips(self, tiktok_id: int, status: str = None) -> list:
+        if status:
+            rows = self.conn.execute(
+                "SELECT * FROM clips WHERE tiktok_id = ? AND status = ? "
+                "ORDER BY generated_at DESC",
+                (int(tiktok_id), status)
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM clips WHERE tiktok_id = ? "
+                "ORDER BY generated_at DESC",
+                (int(tiktok_id),)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_clip(self, clip_id: int) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM clips WHERE id = ?", (int(clip_id),)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def mark_clip_published(self, clip_id: int):
+        self.conn.execute(
+            "UPDATE clips SET status = 'published', published_at = ? WHERE id = ?",
+            (datetime.now().isoformat(), int(clip_id))
+        )
+        self._commit()
+
+    def count_ready_clips(self, tiktok_id: int) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM clips WHERE tiktok_id = ? AND status = 'ready'",
+            (int(tiktok_id),)
+        ).fetchone()
+        return row["n"] if row else 0
+
+    def delete_clip(self, clip_id: int):
+        self.conn.execute("DELETE FROM clips WHERE id = ?", (int(clip_id),))
+        self._commit()
+
+    def recount_clip_statuses(self, tiktok_id: int) -> dict:
+        """Пересчитывает статусы клипов по фактам публикации:
+        клип считается published только если есть publish_script со
+        status='done', ссылающийся на него. Остальные клипы с файлом
+        на диске возвращаются в 'ready'. Возвращает статистику."""
+        tid = int(tiktok_id)
+        published_ids = {
+            r["clip_id"] for r in self.conn.execute(
+                "SELECT DISTINCT clip_id FROM publish_scripts "
+                "WHERE tiktok_id = ? AND status = 'done' AND clip_id IS NOT NULL",
+                (tid,)
+            ).fetchall()
+        }
+        rows = self.conn.execute(
+            "SELECT id, file_path, status FROM clips WHERE tiktok_id = ?",
+            (tid,)
+        ).fetchall()
+        to_ready, to_pub, missing = 0, 0, 0
+        for r in rows:
+            cid, fp, st = r["id"], r["file_path"], r["status"]
+            on_disk = bool(fp) and os.path.exists(fp)
+            if cid in published_ids:
+                if st != "published":
+                    self.conn.execute(
+                        "UPDATE clips SET status='published' WHERE id=?", (cid,)
+                    )
+                    to_pub += 1
+            elif on_disk:
+                if st != "ready":
+                    self.conn.execute(
+                        "UPDATE clips SET status='ready' WHERE id=?", (cid,)
+                    )
+                    to_ready += 1
+            else:
+                missing += 1
+        self._commit()
+        return {"to_ready": to_ready, "to_published": to_pub, "missing": missing}
+
+    # ─────────────────────────────────────────────────────────────────
+    # СКРИПТЫ ПУБЛИКАЦИИ
+    # ─────────────────────────────────────────────────────────────────
+
+    def add_publish_script(self, tiktok_id: int, clip_id: int = None,
+                           title: str = None, file_path: str = None,
+                           hashtags: str = None, caption: str = None,
+                           scheduled_at: str = None,
+                           status: str = "draft") -> int:
+        cur = self.conn.cursor()
+        cur.execute("""
+            INSERT INTO publish_scripts
+                (tiktok_id, clip_id, title, file_path, hashtags,
+                 scheduled_at, caption, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (int(tiktok_id), clip_id, title, file_path, hashtags,
+              scheduled_at, caption, status))
+        self._commit()
+        return cur.lastrowid
+
+    def list_publish_scripts(self, tiktok_id: int, status: str = None) -> list:
+        if status:
+            rows = self.conn.execute(
+                "SELECT * FROM publish_scripts WHERE tiktok_id = ? AND status = ? "
+                "ORDER BY created_at DESC",
+                (int(tiktok_id), status)
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM publish_scripts WHERE tiktok_id = ? "
+                "ORDER BY created_at DESC",
+                (int(tiktok_id),)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_publish_script(self, script_id: int) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM publish_scripts WHERE id = ?", (int(script_id),)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def update_publish_script_status(self, script_id: int, status: str) -> bool:
+        if status == "done":
+            self.conn.execute(
+                "UPDATE publish_scripts SET status = ?, scheduled_at = COALESCE(scheduled_at, ?) "
+                "WHERE id = ?",
+                (status, datetime.now().isoformat(), int(script_id))
+            )
+            # Если скрипт закрыт — помечаем клип как опубликованный
+            row = self.conn.execute(
+                "SELECT clip_id FROM publish_scripts WHERE id = ?", (int(script_id),)
+            ).fetchone()
+            if row and row["clip_id"]:
+                self.mark_clip_published(row["clip_id"])
+        else:
+            self.conn.execute(
+                "UPDATE publish_scripts SET status = ? WHERE id = ?",
+                (status, int(script_id))
+            )
+        self._commit()
+        return True
+
+    def delete_publish_script(self, script_id: int):
+        self.conn.execute("DELETE FROM publish_scripts WHERE id = ?", (int(script_id),))
+        self._commit()
+
+    _TIME_SLOT_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
+
+    @classmethod
+    def _next_free_slot_weekday(cls, schedule: dict, busy: set) -> str | None:
+        """Ближайший свободный слот в формате 'YYYY-MM-DD HH:MM' по
+        расписанию-словарю {"mon":[...],...}."""
+        if not isinstance(schedule, dict):
+            return None
+        if not any(schedule.get(k) for k in cls._WEEKDAYS):
+            return None
+        now = datetime.now()
+        for day_offset in range(0, 30):
+            d = now.date() + timedelta(days=day_offset)
+            day_key = cls._WEEKDAYS[d.weekday()]
+            times = sorted({t for t in schedule.get(day_key, [])
+                            if cls._TIME_SLOT_RE.match(t)})
+            for hhmm in times:
+                h, m = hhmm.split(":")
+                dt_cand = datetime.combine(d, time(int(h), int(m)))
+                if dt_cand <= now:
+                    continue
+                candidate = f"{d.isoformat()} {hhmm}"
+                if candidate in busy:
+                    continue
+                return candidate
+        return None
+
+    def auto_generate_script_for_clip(self, clip_id: int) -> int | None:
+        """Автоматически создаёт publish_script для клипа: подбирает
+        следующий свободный слот из расписания канала, формирует
+        заголовок/теги/caption. Возвращает id скрипта либо None."""
+        try:
+            from utils import normalize_hashtags
+            from tiktok.hashtag_generator import generate_hashtags
+        except Exception:
+            normalize_hashtags = lambda x: list(x or [])
+            def generate_hashtags(title, base, limit=5):
+                return list(base or [])[:limit]
+
+        clip = self.get_clip(int(clip_id))
+        if not clip:
+            return None
+        tt_id = clip.get("tiktok_id")
+        if not tt_id:
+            return None
+        ch = self.get_tiktok_channel(tt_id)
+        if not ch:
+            return None
+        # Пропускаем, если по этому клипу уже есть активный скрипт
+        existing = self.list_publish_scripts(tt_id)
+        if any(s.get("clip_id") == int(clip_id) and s.get("status") != "done"
+               for s in existing):
+            return None
+
+        base_tags = normalize_hashtags(ch.get("hashtags", []))
+        schedule = ch.get("schedule") or {}
+        caption_tpl = (self.get_setting("publish_caption_template")
+                       or "{title}\n\n{hashtags}")
+
+        busy_slots = set()
+        for s in existing:
+            if s.get("status") == "done":
+                continue
+            if s.get("scheduled_at"):
+                busy_slots.add(s["scheduled_at"])
+
+        # Заголовок из исходного видео
+        src_vid = clip.get("source_video_id")
+        video = self.get_video(src_vid) if src_vid else None
+        title = (video.get("title") if video else None) \
+                or os.path.splitext(
+                    os.path.basename(clip.get("file_path") or "")
+                )[0] \
+                or "Клип"
+
+        tags = generate_hashtags(title, base_tags, limit=5)
+        tags_str = " ".join(tags)
+
+        scheduled_at = self._next_free_slot_weekday(schedule, busy_slots)
+
+        ch_name = ch.get("display_name") or f"@{ch.get('handle','')}"
+        try:
+            caption_text = caption_tpl.format(
+                title=title,
+                hashtags=tags_str,
+                channel=ch_name,
+                date=(scheduled_at or datetime.now().strftime("%Y-%m-%d %H:%M")),
+            )
+        except Exception:
+            caption_text = f"{title}\n\n{tags_str}"
+
+        return self.add_publish_script(
+            tiktok_id=tt_id,
+            clip_id=int(clip_id),
+            title=title,
+            file_path=clip.get("file_path"),
+            hashtags=tags_str,
+            caption=caption_text,
+            scheduled_at=scheduled_at,
+            status="draft",
+        )
+
+    # ─────────────────────────────────────────────────────────────────
+    # НАСТРОЙКИ АВТОМАТИЗАЦИИ
+    # ─────────────────────────────────────────────────────────────────
+
+    _AUTO_DEFAULTS = {
+        "download_enabled": 1,
+        "min_duration_sec": 300,
+        "max_duration_sec": 1800,
+        "max_age_days": 7,
+        "fallback_popular": 1,
+        "processing_enabled": 1,
+        "banner_dir": None,
+        "retention_dir": None,
+        "background_dir": None,
+        "clip_duration_sec": 30,
+        "publish_enabled": 1,
+        "auto_active": 0,
+    }
+
+    def _default_media_dirs(self) -> dict:
+        """Возвращает дефолтные пути для banner/retention/background.
+        Используется при INSERT в automation_settings и как фолбэк
+        при пустых значениях, чтобы пайплайн всегда находил файлы.
+        """
+        try:
+            from utils import (
+                get_project_base, DIR_BANNERS, DIR_RETENTION, DIR_BACKGROUNDS,
+            )
+        except Exception:
+            base = os.path.dirname(os.path.abspath(__file__))
+            return {
+                "banner_dir":     os.path.join(base, "баннер"),
+                "retention_dir":  os.path.join(base, "удержание"),
+                "background_dir": os.path.join(base, "фон"),
+            }
+        base = get_project_base()
+        return {
+            "banner_dir":     os.path.join(base, DIR_BANNERS),
+            "retention_dir":  os.path.join(base, DIR_RETENTION),
+            "background_dir": os.path.join(base, DIR_BACKGROUNDS),
+        }
+
+    def get_automation_settings(self, channel_id: int) -> dict:
+        """Возвращает настройки автоматизации для YouTube-канала;
+        создаёт дефолтные если нет.
+
+        Если папки banner/retention/background пусты или NULL — в
+        возвращаемом dict подставляются дефолты (<BASE>/баннер/, и т.п.),
+        чтобы вызывающий код мог их использовать как фолбэк. В БД при
+        этом ничего не пишется — пользователь видит «пустое поле +
+        плейсхолдер» в UI.
+        """
+        row = self.conn.execute(
+            "SELECT * FROM automation_settings WHERE channel_id = ?",
+            (int(channel_id),)
+        ).fetchone()
+        if not row:
+            defaults = self._default_media_dirs()
+            self.conn.execute(
+                "INSERT INTO automation_settings "
+                "(channel_id, banner_dir, retention_dir, background_dir) "
+                "VALUES (?, ?, ?, ?)",
+                (int(channel_id),
+                 defaults["banner_dir"],
+                 defaults["retention_dir"],
+                 defaults["background_dir"])
+            )
+            self._commit()
+            row = self.conn.execute(
+                "SELECT * FROM automation_settings WHERE channel_id = ?",
+                (int(channel_id),)
+            ).fetchone()
+
+        d = dict(row)
+        defaults = self._default_media_dirs()
+        for key in ("banner_dir", "retention_dir", "background_dir"):
+            if not d.get(key):
+                d[key] = defaults[key]
+        return d
+
+    def set_automation_settings(self, channel_id: int, **fields) -> bool:
+        allowed = set(self._AUTO_DEFAULTS.keys())
+        data = {k: v for k, v in fields.items() if k in allowed}
+        if not data:
+            return False
+        self.get_automation_settings(int(channel_id))  # гарантируем запись
+        data["updated_at"] = datetime.now().isoformat()
+        set_clause = ", ".join(f"{k} = ?" for k in data)
+        values = list(data.values()) + [int(channel_id)]
+        self.conn.execute(
+            f"UPDATE automation_settings SET {set_clause} WHERE channel_id = ?",
+            values
+        )
+        self._commit()
+        return True
+
+    def set_auto_active(self, channel_id: int, active: bool) -> bool:
+        """Включает/выключает автоматизацию для конкретного канала."""
+        self.get_automation_settings(int(channel_id))
+        self.conn.execute(
+            "UPDATE automation_settings "
+            "SET auto_active = ?, updated_at = ? WHERE channel_id = ?",
+            (1 if active else 0, datetime.now().isoformat(), int(channel_id))
+        )
+        self._commit()
+        return True
+
+    def list_active_automation_channels(self) -> list[int]:
+        """Возвращает id каналов, у которых включена автоматизация."""
+        rows = self.conn.execute(
+            "SELECT channel_id FROM automation_settings WHERE auto_active = 1"
+        ).fetchall()
+        return [int(r[0]) for r in rows]
+
+    def get_tiktok_for_channel(self, channel_id: int) -> list:
+        """Возвращает список id TikTok-каналов, привязанных к YouTube-каналу."""
+        rows = self.conn.execute(
+            "SELECT tiktok_id FROM tiktok_youtube_link WHERE youtube_id = ?",
+            (int(channel_id),)
+        ).fetchall()
+        return [int(r[0]) for r in rows]
+
+    # ─────────────────────────────────────────────────────────────────
+    # НАСТРОЙКИ ПРИЛОЖЕНИЯ (key/value)
+    # ─────────────────────────────────────────────────────────────────
+
+    def get_setting(self, key: str, default=None):
+        row = self.conn.execute(
+            "SELECT value FROM app_settings WHERE key = ?", (key,)
+        ).fetchone()
+        if not row:
+            return default
+        raw = row["value"]
+        if raw is None:
+            return default
+        # Попробуем распарсить JSON (для dict/list), иначе строка
+        try:
+            return json.loads(raw)
+        except Exception:
+            return raw
+
+    def set_setting(self, key: str, value) -> bool:
+        if isinstance(value, (dict, list, tuple)):
+            payload = json.dumps(value, ensure_ascii=False)
+        elif value is None:
+            payload = None
+        else:
+            payload = str(value)
+        self.conn.execute("""
+            INSERT INTO app_settings (key, value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = CURRENT_TIMESTAMP
+        """, (key, payload))
+        self._commit()
+        return True
 
     # ─────────────────────────────────────────────────────────────────
     # УТИЛИТЫ
