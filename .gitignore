@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.DS_Store
+yt_manager/data/app.db
+yt_manager/downloads/
+yt_manager/processed/
+yt_manager/каналы/
+yt_manager/обработанное/
+yt_manager/клипы/
