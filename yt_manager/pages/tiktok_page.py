@@ -14,7 +14,7 @@ import json
 import logging
 import os
 import re
-from datetime import datetime
+from datetime import datetime, time, timedelta
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
@@ -37,34 +37,49 @@ log = logging.getLogger(__name__)
 
 _TIME_SLOT_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
+WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+WEEKDAY_RU = {
+    "mon": "Понедельник", "tue": "Вторник", "wed": "Среда",
+    "thu": "Четверг", "fri": "Пятница", "sat": "Суббота", "sun": "Воскресенье",
+}
 
-def _next_free_slot(schedule: list, busy: set) -> str | None:
+
+def _normalize_schedule(raw) -> dict:
+    """Превращает расписание в dict по 7 дням. Принимает dict или list."""
+    if isinstance(raw, dict):
+        return {k: list(raw.get(k, []) or []) for k in WEEKDAYS}
+    if isinstance(raw, list):
+        return {k: list(raw) for k in WEEKDAYS}
+    return {k: [] for k in WEEKDAYS}
+
+
+def _next_free_slot_weekday(schedule, busy: set) -> str | None:
     """Возвращает ближайший свободный слот публикации в формате
-    'YYYY-MM-DD HH:MM'. `schedule` — список строк 'HH:MM' из
-    графика канала; `busy` — уже занятые (точные строки).
-    Если расписание пусто — возвращает None (планирование не задано)."""
-    if not schedule:
+    'YYYY-MM-DD HH:MM', учитывая расписание по дням недели.
+    `schedule` — dict {"mon":[...],...} или list (BC). `busy` — занятые слоты."""
+    sched = _normalize_schedule(schedule)
+    if not any(sched[k] for k in WEEKDAYS):
         return None
-    slots = sorted({s for s in schedule if _TIME_SLOT_RE.match(s)})
-    if not slots:
-        return None
-    from datetime import timedelta
-    today = datetime.now().date()
+    now = datetime.now()
     for day_offset in range(0, 30):
-        d = today + timedelta(days=day_offset)
-        for hhmm in slots:
+        d = now.date() + timedelta(days=day_offset)
+        day_key = WEEKDAYS[d.weekday()]
+        times = sorted({t for t in sched.get(day_key, []) if _TIME_SLOT_RE.match(t)})
+        for hhmm in times:
+            h, m = hhmm.split(":")
+            dt_cand = datetime.combine(d, time(int(h), int(m)))
+            if dt_cand <= now:
+                continue
             candidate = f"{d.isoformat()} {hhmm}"
-            # На сегодня — только будущие
-            if day_offset == 0:
-                h, m = hhmm.split(":")
-                dt_cand = datetime.combine(
-                    d, datetime.min.time().replace(hour=int(h), minute=int(m))
-                )
-                if dt_cand < datetime.now():
-                    continue
-            if candidate not in busy:
-                return candidate
+            if candidate in busy:
+                continue
+            return candidate
     return None
+
+
+# Сохранение обратной совместимости с прежним именем
+def _next_free_slot(schedule, busy: set) -> str | None:
+    return _next_free_slot_weekday(schedule, busy)
 
 
 class AddTikTokDialog(QDialog):
@@ -259,26 +274,70 @@ class TikTokPage(BasePage):
         lay.setContentsMargins(12, 12, 12, 12)
         lay.setSpacing(8)
 
-        lay.addWidget(QLabel("Времена публикаций (HH:MM):"))
-        self.list_schedule = QListWidget()
-        lay.addWidget(self.list_schedule, 1)
+        lay.addWidget(QLabel("График публикаций по дням недели. "
+                             "Изменения сохраняются автоматически."))
 
-        row = QHBoxLayout()
-        self.time_picker = QTimeEdit()
-        self.time_picker.setDisplayFormat("HH:mm")
-        self.time_picker.setTime(QTime.currentTime())
-        btn_add_time = QPushButton("+ Добавить время")
-        btn_add_time.clicked.connect(self._on_add_schedule)
-        btn_del_time = QPushButton("Удалить")
-        btn_del_time.clicked.connect(self._on_delete_schedule)
-        btn_save_time = QPushButton("Сохранить")
-        btn_save_time.clicked.connect(self._save_schedule)
-        row.addWidget(self.time_picker)
-        row.addWidget(btn_add_time)
-        row.addWidget(btn_del_time)
-        row.addStretch()
-        row.addWidget(btn_save_time)
-        lay.addLayout(row)
+        tools = QHBoxLayout()
+        btn_copy_weekdays = QPushButton("Копировать понедельник на будни")
+        btn_copy_weekdays.clicked.connect(lambda: self._copy_schedule_mon("weekdays"))
+        btn_copy_all = QPushButton("На все дни")
+        btn_copy_all.clicked.connect(lambda: self._copy_schedule_mon("all"))
+        btn_clear = QPushButton("Очистить все")
+        btn_clear.clicked.connect(self._clear_schedule_all)
+        for b in (btn_copy_weekdays, btn_copy_all, btn_clear):
+            tools.addWidget(b)
+        tools.addStretch()
+        self.lbl_schedule_saved = QLabel("")
+        self.lbl_schedule_saved.setStyleSheet("color:#6ec06e; font-weight:600;")
+        tools.addWidget(self.lbl_schedule_saved)
+        lay.addLayout(tools)
+
+        # Аккордеон дней недели
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        host = QWidget()
+        host_lay = QVBoxLayout(host)
+        host_lay.setContentsMargins(4, 4, 4, 4)
+        host_lay.setSpacing(6)
+
+        self._day_widgets: dict[str, dict] = {}
+        for key in WEEKDAYS:
+            box = QGroupBox(WEEKDAY_RU[key])
+            box_lay = QVBoxLayout(box)
+            box_lay.setContentsMargins(8, 8, 8, 8)
+            box_lay.setSpacing(4)
+
+            times_list = QListWidget()
+            times_list.setMaximumHeight(110)
+            box_lay.addWidget(times_list)
+
+            row = QHBoxLayout()
+            picker = QTimeEdit()
+            picker.setDisplayFormat("HH:mm")
+            picker.setTime(QTime(12, 0))
+            btn_add = QPushButton("+ Добавить")
+            btn_del = QPushButton("Удалить")
+            row.addWidget(picker)
+            row.addWidget(btn_add)
+            row.addWidget(btn_del)
+            row.addStretch()
+            box_lay.addLayout(row)
+
+            btn_add.clicked.connect(
+                lambda _=None, k=key: self._on_add_day_time(k)
+            )
+            btn_del.clicked.connect(
+                lambda _=None, k=key: self._on_del_day_time(k)
+            )
+
+            self._day_widgets[key] = {
+                "list": times_list, "picker": picker, "box": box,
+            }
+            host_lay.addWidget(box)
+
+        host_lay.addStretch()
+        scroll.setWidget(host)
+        lay.addWidget(scroll, 1)
         return w
 
     def _build_scripts_tab(self) -> QWidget:
@@ -370,10 +429,13 @@ class TikTokPage(BasePage):
             self.list_tags.addItem(item)
         self._suppress_autosave = False
 
-        # Расписание
-        self.list_schedule.clear()
-        for t in ch.get("schedule", []):
-            self.list_schedule.addItem(t)
+        # Расписание по дням недели
+        sched = _normalize_schedule(ch.get("schedule"))
+        for key in WEEKDAYS:
+            lst = self._day_widgets[key]["list"]
+            lst.clear()
+            for t in sorted({x for x in sched.get(key, []) if _TIME_SLOT_RE.match(x)}):
+                lst.addItem(t)
 
         # Скрипты (черновики + отмеченные)
         scripts = db.list_publish_scripts(self._current_id)
@@ -499,29 +561,63 @@ class TikTokPage(BasePage):
     # Schedule ------------------------------------------------------
     _TIME_RE = re.compile(r"^\d{1,2}:\d{2}$")
 
-    def _on_add_schedule(self):
-        t = self.time_picker.time().toString("HH:mm")
-        for i in range(self.list_schedule.count()):
-            if self.list_schedule.item(i).text() == t:
+    def _collect_schedule(self) -> dict:
+        out: dict[str, list[str]] = {}
+        for key in WEEKDAYS:
+            lst = self._day_widgets[key]["list"]
+            times = []
+            for i in range(lst.count()):
+                t = lst.item(i).text().strip()
+                if _TIME_SLOT_RE.match(t):
+                    times.append(t)
+            out[key] = sorted(set(times))
+        return out
+
+    def _on_add_day_time(self, day_key: str):
+        w = self._day_widgets[day_key]
+        t = w["picker"].time().toString("HH:mm")
+        lst = w["list"]
+        for i in range(lst.count()):
+            if lst.item(i).text() == t:
                 return
-        self.list_schedule.addItem(t)
+        lst.addItem(t)
+        self._schedule_save_timer.start(500)
 
-    def _on_delete_schedule(self):
-        row = self.list_schedule.currentRow()
+    def _on_del_day_time(self, day_key: str):
+        lst = self._day_widgets[day_key]["list"]
+        row = lst.currentRow()
         if row >= 0:
-            self.list_schedule.takeItem(row)
+            lst.takeItem(row)
+            self._schedule_save_timer.start(500)
 
-    def _save_schedule(self):
+    def _copy_schedule_mon(self, mode: str):
+        mon_lst = self._day_widgets["mon"]["list"]
+        mon_times = [mon_lst.item(i).text() for i in range(mon_lst.count())]
+        targets = WEEKDAYS[1:5] if mode == "weekdays" else WEEKDAYS[1:]
+        for key in targets:
+            lst = self._day_widgets[key]["list"]
+            lst.clear()
+            for t in mon_times:
+                lst.addItem(t)
+        self._schedule_save_timer.start(300)
+
+    def _clear_schedule_all(self):
+        if QMessageBox.question(
+            self, "Очистить график",
+            "Удалить все времена публикаций во всех днях?"
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        for key in WEEKDAYS:
+            self._day_widgets[key]["list"].clear()
+        self._schedule_save_timer.start(100)
+
+    def _autosave_schedule(self):
         if not self._current_id:
             return
-        times = []
-        for i in range(self.list_schedule.count()):
-            t = self.list_schedule.item(i).text().strip()
-            if self._TIME_RE.match(t):
-                times.append(t)
-        times = sorted(set(times))
-        db.set_tiktok_schedule(self._current_id, times)
-        QMessageBox.information(self, "Сохранено", f"Сохранено {len(times)} слотов.")
+        sched = self._collect_schedule()
+        if db.set_tiktok_schedule(self._current_id, sched):
+            total = sum(len(sched[k]) for k in WEEKDAYS)
+            self._show_saved(self.lbl_schedule_saved, f"Сохранено ({total} слотов)")
 
     # Scripts -------------------------------------------------------
     def _on_generate_scripts(self):

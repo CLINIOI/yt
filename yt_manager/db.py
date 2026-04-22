@@ -916,6 +916,23 @@ class Database:
             ).fetchone()
             return row["id"] if row else None
 
+    _WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+    @classmethod
+    def _parse_schedule(cls, raw: str | None) -> dict:
+        """Парсит schedule_json. Новый формат — dict {"mon":[...],...}.
+        Старый — плоский список; расширяется на все 7 дней."""
+        try:
+            data = json.loads(raw or "[]")
+        except Exception:
+            return {k: [] for k in cls._WEEKDAYS}
+        if isinstance(data, dict):
+            return {k: list(data.get(k, []) or []) for k in cls._WEEKDAYS}
+        if isinstance(data, list):
+            times = list(data)
+            return {k: list(times) for k in cls._WEEKDAYS}
+        return {k: [] for k in cls._WEEKDAYS}
+
     def get_tiktok_channel(self, tiktok_id: int) -> dict | None:
         row = self.conn.execute(
             "SELECT * FROM tiktok_channels WHERE id = ?", (tiktok_id,)
@@ -924,7 +941,7 @@ class Database:
             return None
         d = dict(row)
         d["hashtags"] = json.loads(d.get("hashtags_json") or "[]")
-        d["schedule"] = json.loads(d.get("schedule_json") or "[]")
+        d["schedule"] = self._parse_schedule(d.get("schedule_json"))
         return d
 
     def get_tiktok_channel_by_handle(self, handle: str) -> dict | None:
@@ -938,7 +955,7 @@ class Database:
             return None
         d = dict(row)
         d["hashtags"] = json.loads(d.get("hashtags_json") or "[]")
-        d["schedule"] = json.loads(d.get("schedule_json") or "[]")
+        d["schedule"] = self._parse_schedule(d.get("schedule_json"))
         return d
 
     def list_tiktok_channels(self) -> list:
@@ -949,7 +966,7 @@ class Database:
         for r in rows:
             d = dict(r)
             d["hashtags"] = json.loads(d.get("hashtags_json") or "[]")
-            d["schedule"] = json.loads(d.get("schedule_json") or "[]")
+            d["schedule"] = self._parse_schedule(d.get("schedule_json"))
             result.append(d)
         return result
 
@@ -976,8 +993,16 @@ class Database:
         payload = json.dumps(list(hashtags or []), ensure_ascii=False)
         return self.update_tiktok_channel(tiktok_id, hashtags_json=payload)
 
-    def set_tiktok_schedule(self, tiktok_id: int, schedule: list) -> bool:
-        payload = json.dumps(list(schedule or []), ensure_ascii=False)
+    def set_tiktok_schedule(self, tiktok_id: int, schedule) -> bool:
+        """Сохраняет график. Принимает dict {"mon":[...],...} или список
+        (для обратной совместимости — расширяется на все дни)."""
+        if isinstance(schedule, dict):
+            norm = {k: list(schedule.get(k, []) or []) for k in self._WEEKDAYS}
+        elif isinstance(schedule, list):
+            norm = {k: list(schedule) for k in self._WEEKDAYS}
+        else:
+            norm = {k: [] for k in self._WEEKDAYS}
+        payload = json.dumps(norm, ensure_ascii=False)
         return self.update_tiktok_channel(tiktok_id, schedule_json=payload)
 
     # ─────────────────────────────────────────────────────────────────
