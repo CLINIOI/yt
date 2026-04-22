@@ -27,9 +27,9 @@ from typing import Optional
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
-    QGroupBox, QHBoxLayout, QInputDialog, QLabel, QListWidget,
+    QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QListWidget,
     QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox,
-    QVBoxLayout, QLineEdit, QFrame,
+    QTableWidget, QTableWidgetItem, QVBoxLayout, QLineEdit, QFrame,
 )
 
 from pages.base_page import BasePage
@@ -788,6 +788,7 @@ class AutomationPage(BasePage):
         root.addWidget(self._build_clip_block())
 
         root.addWidget(self._build_journal_group(), 1)
+        root.addWidget(self._build_channels_status_group())
 
         bar = QHBoxLayout()
         bar.addStretch()
@@ -967,6 +968,73 @@ class AutomationPage(BasePage):
         self.journal.setMaximumBlockCount(1000)
         lay.addWidget(self.journal)
         return g
+
+    def _build_channels_status_group(self) -> QGroupBox:
+        """Таблица статусов по всем YouTube-каналам с per-channel
+        кнопкой ▶/⏸. Обновляется раз в 5 секунд."""
+        g = QGroupBox("Статус по каналам")
+        lay = QVBoxLayout(g)
+        self.tbl_channels = QTableWidget(0, 6)
+        self.tbl_channels.setHorizontalHeaderLabels([
+            "Канал", "TikTok", "Готовых клипов", "Порог", "Авто", "Действие"
+        ])
+        hdr = self.tbl_channels.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl_channels.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.tbl_channels.verticalHeader().setVisible(False)
+        lay.addWidget(self.tbl_channels)
+
+        self._channels_refresh_timer = QTimer(self)
+        self._channels_refresh_timer.setInterval(5000)
+        self._channels_refresh_timer.timeout.connect(self._refresh_channels_status)
+        self._channels_refresh_timer.start()
+        return g
+
+    def _refresh_channels_status(self):
+        """Перезаполняет таблицу статуса каналов."""
+        try:
+            channels = db.get_all_channels() or []
+        except Exception:
+            channels = []
+        self.tbl_channels.setRowCount(0)
+        for ch in channels:
+            cid = int(ch["id"])
+            try:
+                tts = db.list_tiktok_for_youtube(cid) or []
+            except Exception:
+                tts = []
+            try:
+                s = db.get_automation_settings(cid) or {}
+            except Exception:
+                s = {}
+            tt_labels = ", ".join("@" + (t.get("handle") or str(t.get("id","?")))
+                                  for t in tts) or "—"
+            ready = sum(db.count_ready_clips(int(t["id"])) for t in tts)
+            buf = max((int(t.get("clip_min_buffer") or 10) for t in tts), default=10)
+            auto_on = bool(s.get("auto_active"))
+            active_in_mem = cid in self._active_pipelines
+
+            r = self.tbl_channels.rowCount()
+            self.tbl_channels.insertRow(r)
+            self.tbl_channels.setItem(r, 0, QTableWidgetItem(
+                ch.get("title") or ch.get("url") or f"#{cid}"
+            ))
+            self.tbl_channels.setItem(r, 1, QTableWidgetItem(tt_labels))
+            self.tbl_channels.setItem(r, 2, QTableWidgetItem(str(ready)))
+            self.tbl_channels.setItem(r, 3, QTableWidgetItem(str(buf)))
+            state = "● работает" if active_in_mem else ("● вкл" if auto_on else "○ выкл")
+            item_state = QTableWidgetItem(state)
+            if auto_on or active_in_mem:
+                item_state.setForeground(Qt.GlobalColor.darkGreen)
+            self.tbl_channels.setItem(r, 4, item_state)
+
+            btn = QPushButton("⏸ Остановить" if auto_on else "▶ Запустить")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(
+                lambda _=None, chid=cid: self._toggle_channel_auto(chid)
+            )
+            self.tbl_channels.setCellWidget(r, 5, btn)
 
     # ── Helpers ────────────────────────────────────────────────────
     def _media_defaults(self) -> dict:
@@ -1157,6 +1225,45 @@ class AutomationPage(BasePage):
         log.info("auto: %s", msg)
 
     # ── Большая кнопка: запуск/остановка автоматизации ────────────
+
+    def _toggle_channel_auto(self, channel_id: int):
+        """Включает/выключает авто-режим для конкретного канала из таблицы
+        статусов. Валидирует так же, как основная кнопка."""
+        try:
+            s = db.get_automation_settings(channel_id) or {}
+        except Exception:
+            s = {}
+        if s.get("auto_active"):
+            db.set_auto_active(channel_id, False)
+            self._log(f"Автоматизация остановлена для канала #{channel_id}.")
+            if self._current_channel == channel_id:
+                self._on_channel_changed()
+            self._sync_timer_state()
+            self._refresh_channels_status()
+            return
+
+        tt_list = db.list_tiktok_for_youtube(channel_id)
+        if not tt_list:
+            QMessageBox.warning(
+                self, "Не могу запустить",
+                f"К каналу #{channel_id} не привязан ни один TikTok — "
+                "привяжите его на вкладке «Автоматизация»."
+            )
+            return
+        if not (s.get("download_enabled") or s.get("processing_enabled")
+                or s.get("publish_enabled")):
+            QMessageBox.warning(
+                self, "Не могу запустить",
+                "В настройках канала не включён ни один блок "
+                "(скачивание/монтаж/клипы)."
+            )
+            return
+        db.set_auto_active(channel_id, True)
+        self._log(f"Автоматизация запущена для канала #{channel_id}.")
+        self._sync_timer_state()
+        self._refresh_channels_status()
+        # Первый тик — сразу
+        self._run_auto_check()
 
     def _on_auto_toggle(self):
         if not self._current_channel:
