@@ -302,12 +302,15 @@ def load_download_dir(channel_title: str, channel_id: int | None = None) -> str:
     Возвращает папку для сохранения видео канала.
 
     Приоритет путей:
-      1. Если канал привязан к TikTok-каналу → <проект>/каналы/<tt>/<yt>/
-      2. Иначе → config.paths.downloads/<yt> (старая схема, для совместимости)
+      1. Если канал привязан к TikTok-каналу → <проект>/загрузки/<tt>/<yt>/
+      2. Иначе → <проект>/загрузки/<yt>/ (без TikTok-привязки)
 
     Имена везде прогоняются через strip_bracket_codes/sanitize_dirname.
     """
-    from utils import clean_video_name, sanitize_dirname as _sd, get_project_base
+    from utils import (
+        clean_video_name, sanitize_dirname as _sd,
+        get_project_base, DIR_DOWNLOADS,
+    )
     yt_name = _sd(clean_video_name(channel_title or "unknown") or "unknown")
 
     # Ищем связь с TikTok
@@ -318,20 +321,14 @@ def load_download_dir(channel_title: str, channel_id: int | None = None) -> str:
             if linked:
                 tt = linked[0]  # берём первый связанный
                 tt_dir = _sd(tt.get("handle") or "unknown")
-                new_base = os.path.join(get_project_base(), "каналы", tt_dir, yt_name)
-                return new_base
+                return os.path.join(
+                    get_project_base(), DIR_DOWNLOADS, tt_dir, yt_name
+                )
         except Exception:
             pass
 
-    # Старый путь — обратная совместимость
-    try:
-        with open(CONFIG_PATH, encoding="utf-8") as fh:
-            cfg = json.load(fh)
-        base = cfg.get("paths", {}).get("downloads", "./downloads")
-    except Exception:
-        base = "./downloads"
-    base = os.path.join(os.path.dirname(CONFIG_PATH), base)
-    return os.path.join(base, yt_name)
+    # Без привязки: <проект>/загрузки/<yt>/
+    return os.path.join(get_project_base(), DIR_DOWNLOADS, yt_name)
 
 
 # ─────────────────────────────────────────────────────────────────────

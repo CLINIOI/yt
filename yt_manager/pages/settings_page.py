@@ -230,7 +230,7 @@ class SettingsPage(BasePage):
         lay.addLayout(row)
 
         row = QHBoxLayout()
-        btn = QPushButton("Очистить кэш (downloads/processed)")
+        btn = QPushButton("Очистить кэш (загрузки/обработанное)")
         btn.clicked.connect(self._clear_cache)
         row.addWidget(btn)
         row.addStretch()
@@ -646,13 +646,14 @@ class SettingsPage(BasePage):
     # ── Actions ────────────────────────────────────────────────────
     def _clear_cache(self):
         from main import BASE_DIR  # type: ignore
+        from utils import DIR_DOWNLOADS, DIR_PROCESSED
         targets = [
-            os.path.join(BASE_DIR, "downloads"),
-            os.path.join(BASE_DIR, "processed"),
+            os.path.join(BASE_DIR, DIR_DOWNLOADS),
+            os.path.join(BASE_DIR, DIR_PROCESSED),
         ]
         reply = QMessageBox.question(
             self, "Очистка кэша",
-            "Удалить содержимое папок downloads/ и processed/?\n"
+            f"Удалить содержимое папок {DIR_DOWNLOADS}/ и {DIR_PROCESSED}/?\n"
             "Файлы будут удалены безвозвратно.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
         )

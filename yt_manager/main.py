@@ -73,7 +73,7 @@ def ensure_dirs(config: dict):
     try:
         from utils import PROJECT_DIRS
     except Exception:
-        PROJECT_DIRS = ("каналы", "обработанное", "клипы",
+        PROJECT_DIRS = ("загрузки", "обработанное", "нарезки",
                         "баннер", "удержание", "фон")
     for folder in PROJECT_DIRS:
         try:
@@ -150,7 +150,32 @@ def main():
         msg.exec()
         sys.exit(1)
 
-    # 6. Одноразовая миграция имён файлов (удаление [XXXX])
+    # 6. Одноразовая миграция структуры папок v1 (каналы → загрузки, клипы → нарезки).
+    # ВАЖНО: выполняется ДО миграции имён файлов, чтобы _iter_files видел
+    # уже переименованные папки.
+    try:
+        import logging
+        from utils import migrate_dirs_v1
+        _log = logging.getLogger("dirs_migration")
+        ds = migrate_dirs_v1(BASE_DIR, log=_log)
+        if ds.get("renamed") or ds.get("merged") or ds.get("db_videos") or ds.get("db_clips"):
+            _log.info(
+                "Миграция папок v1: переименовано=%s, слито=%d, "
+                "videos.file_path=%d, clips.file_path=%d, ошибок=%d",
+                ds.get("renamed"), ds.get("merged", 0),
+                ds.get("db_videos", 0), ds.get("db_clips", 0),
+                ds.get("errors", 0),
+            )
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception(
+            "migrate_dirs_v1 упала — продолжаем запуск"
+        )
+
+    # Пересоздаём папки после миграции (на случай, если что-то переименовалось).
+    ensure_dirs(config)
+
+    # 7. Одноразовая миграция имён файлов (удаление [XXXX])
     try:
         import logging
         from utils import migrate_existing_filenames

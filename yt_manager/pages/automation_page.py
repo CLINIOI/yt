@@ -36,7 +36,7 @@ from pages.base_page import BasePage
 from db import db
 from utils import (
     sanitize_dirname, clean_video_name, get_project_base,
-    DIR_CLIPS, DIR_PROCESSED,
+    DIR_CLIPS, DIR_PROCESSED, DIR_DOWNLOADS,
 )
 from video_service import validate_processing_dirs, pick_first_video
 
@@ -499,7 +499,8 @@ class AutoPipelineWorker(QThread):
         except Exception:
             load_download_dir = None
         out_dir = (load_download_dir(ch.get("title") or "unknown", ch["id"])
-                   if load_download_dir else os.path.abspath("downloads"))
+                   if load_download_dir else
+                   os.path.join(get_project_base(), DIR_DOWNLOADS))
         try:
             from youtube_service import yt_service
             db.update_video_status(v["id"], "downloading")
@@ -1257,7 +1258,8 @@ class AutomationPage(BasePage):
         if not matched and f.get("fallback_popular"):
             matched = sorted(videos, key=lambda v: v.get("view_count") or 0, reverse=True)[:5]
         out_dir = (load_download_dir(c.get("title") or "unknown", c["id"])
-                   if load_download_dir else os.path.abspath("downloads"))
+                   if load_download_dir else
+                   os.path.join(get_project_base(), DIR_DOWNLOADS))
         for v in matched:
             try:
                 queue_manager.add(

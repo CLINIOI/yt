@@ -21,17 +21,32 @@ _INVALID_FS_CHARS = re.compile(r'[\/:*?"<>|]')
 # ──────────────────────────────────────────────────────────────────────
 # Имена папок-констант файловой структуры проекта
 # ──────────────────────────────────────────────────────────────────────
+#
+# ВАЖНО: раунд 7 — переименовали папки для единообразия с UI «Папки»:
+#   каналы/   → загрузки/     (сырые скачанные видео)
+#   клипы/    → нарезки/      (готовые для публикации куски)
+# Миграция выполняется в utils.migrate_dirs_v1 при старте — идемпотентно
+# по флагу app_settings.dirs_renamed_v1.
 
-DIR_CHANNELS    = "каналы"
+DIR_DOWNLOADS   = "загрузки"     # ранее: каналы
 DIR_PROCESSED   = "обработанное"
-DIR_CLIPS       = "клипы"
+DIR_CLIPS       = "нарезки"      # ранее: клипы
 DIR_BANNERS     = "баннер"
 DIR_RETENTION   = "удержание"
 DIR_BACKGROUNDS = "фон"
 
+# Алиас для обратной совместимости с существующим кодом. В старых коммитах
+# использовалась константа DIR_CHANNELS — новые модули должны использовать
+# DIR_DOWNLOADS, но импорты старого имени продолжат работать.
+DIR_CHANNELS = DIR_DOWNLOADS
+
+# Старые имена папок — используются только миграцией.
+_LEGACY_DIR_DOWNLOADS = "каналы"
+_LEGACY_DIR_CLIPS     = "клипы"
+
 #: Полный список папок, которые ensure_dirs создаёт при старте.
 PROJECT_DIRS = (
-    DIR_CHANNELS, DIR_PROCESSED, DIR_CLIPS,
+    DIR_DOWNLOADS, DIR_PROCESSED, DIR_CLIPS,
     DIR_BANNERS, DIR_RETENTION, DIR_BACKGROUNDS,
 )
 
@@ -160,6 +175,16 @@ def project_path(*parts: str) -> str:
     return os.path.join(get_project_base(), *cleaned) if cleaned else get_project_base()
 
 
+def project_dir(dir_const: str, *parts: str) -> str:
+    """Путь к одной из папок проекта (DIR_DOWNLOADS/DIR_PROCESSED/DIR_CLIPS/…).
+
+    Первый аргумент — имя папки-константы (например, DIR_CLIPS). Последующие
+    сегменты очищаются через sanitize_dirname и склеиваются.
+    """
+    sub = [sanitize_dirname(str(p)) for p in parts if p]
+    return os.path.join(get_project_base(), dir_const, *sub) if dir_const else get_project_base()
+
+
 def ensure_dir(path: str) -> str:
     """Гарантирует существование папки, возвращает её путь."""
     if path:
@@ -218,8 +243,9 @@ def migrate_existing_filenames(base_path: str, log=None) -> dict:
 
     roots = [
         os.path.join(base_path, "downloads"),
-        os.path.join(base_path, "каналы"),
-        os.path.join(base_path, "обработанное"),
+        os.path.join(base_path, _LEGACY_DIR_DOWNLOADS),  # каналы
+        os.path.join(base_path, DIR_DOWNLOADS),          # загрузки
+        os.path.join(base_path, DIR_PROCESSED),
     ]
 
     path_map: dict[str, str] = {}
@@ -275,6 +301,154 @@ def migrate_existing_filenames(base_path: str, log=None) -> dict:
     if _db is not None:
         try:
             _db.set_setting(_MIGRATION_FLAG, "1")
+        except Exception:
+            pass
+    return stats
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Миграция v1: каналы/ → загрузки/, клипы/ → нарезки/
+# ──────────────────────────────────────────────────────────────────────
+
+_DIRS_MIGRATION_FLAG = "dirs_renamed_v1"
+
+
+def _merge_tree(src: str, dst: str, log=None) -> tuple[int, int]:
+    """Рекурсивно перемещает содержимое src в dst. Если файл в dst уже
+    есть — не затираем (оставляем старый в src). Возвращает (moved, skipped).
+    """
+    moved, skipped = 0, 0
+    if not os.path.isdir(src):
+        return 0, 0
+    try:
+        os.makedirs(dst, exist_ok=True)
+    except OSError:
+        return 0, 0
+    for name in list(os.listdir(src)):
+        s = os.path.join(src, name)
+        d = os.path.join(dst, name)
+        try:
+            if os.path.isdir(s):
+                sub_m, sub_s = _merge_tree(s, d, log=log)
+                moved += sub_m
+                skipped += sub_s
+                # Попытка удалить src-подпапку если пуста
+                try:
+                    if not os.listdir(s):
+                        os.rmdir(s)
+                except OSError:
+                    pass
+            else:
+                if os.path.exists(d):
+                    skipped += 1
+                    continue
+                import shutil
+                shutil.move(s, d)
+                moved += 1
+        except Exception as e:
+            if log:
+                log.warning("merge %s → %s: %s", s, d, e)
+            skipped += 1
+    return moved, skipped
+
+
+def migrate_dirs_v1(base_path: str, log=None) -> dict:
+    """Одноразовая миграция структуры папок:
+      каналы/  → загрузки/
+      клипы/   → нарезки/
+
+    Для каждой пары:
+      • если назначения ещё нет и источник есть — просто переименовываем;
+      • если и источник, и назначение существуют — мержим дерево
+        (не затирая совпадающие файлы в назначении);
+      • после мержа обновляем videos.file_path и clips.file_path в БД
+        (префиксная замена).
+
+    Идемпотентна через флаг app_settings.dirs_renamed_v1.
+    """
+    stats = {"renamed": [], "merged": 0, "db_videos": 0, "db_clips": 0,
+             "errors": 0}
+    try:
+        from db import db as _db
+    except Exception:
+        _db = None
+
+    if _db is not None:
+        try:
+            if _db.get_setting(_DIRS_MIGRATION_FLAG):
+                if log:
+                    log.info("migrate_dirs_v1: уже выполнена — пропуск")
+                return stats
+        except Exception:
+            pass
+
+    pairs = [
+        (_LEGACY_DIR_DOWNLOADS, DIR_DOWNLOADS),  # каналы → загрузки
+        (_LEGACY_DIR_CLIPS,     DIR_CLIPS),      # клипы  → нарезки
+    ]
+
+    import shutil as _sh
+    path_prefix_map: list[tuple[str, str]] = []
+    for old_name, new_name in pairs:
+        old_abs = os.path.join(base_path, old_name)
+        new_abs = os.path.join(base_path, new_name)
+        if not os.path.isdir(old_abs):
+            continue
+        try:
+            if not os.path.exists(new_abs):
+                _sh.move(old_abs, new_abs)
+                stats["renamed"].append((old_name, new_name))
+                if log:
+                    log.info("migrate_dirs_v1: переименовано %s → %s",
+                             old_name, new_name)
+            else:
+                moved, _skipped = _merge_tree(old_abs, new_abs, log=log)
+                stats["merged"] += moved
+                if log:
+                    log.info("migrate_dirs_v1: слито %d файлов %s → %s",
+                             moved, old_name, new_name)
+                try:
+                    _sh.rmtree(old_abs, ignore_errors=True)
+                except Exception:
+                    pass
+        except Exception as e:
+            if log:
+                log.warning("migrate_dirs_v1: %s → %s: %s",
+                            old_name, new_name, e)
+            stats["errors"] += 1
+            continue
+        path_prefix_map.append((old_abs, new_abs))
+        # Нормализованные с разделителем в конце — чтобы не поймать
+        # случайное совпадение "каналы" внутри другого пути
+        path_prefix_map.append((old_abs + os.sep, new_abs + os.sep))
+
+    # Обновляем пути в БД
+    if _db is not None and path_prefix_map:
+        try:
+            cur = _db.conn.cursor()
+            for table, col, key in (("videos", "file_path", "db_videos"),
+                                    ("clips",  "file_path", "db_clips")):
+                for old_p, new_p in path_prefix_map:
+                    try:
+                        cur.execute(
+                            f"UPDATE {table} SET {col} = REPLACE({col}, ?, ?) "
+                            f"WHERE {col} LIKE ?",
+                            (old_p, new_p, old_p + "%"),
+                        )
+                        stats[key] += cur.rowcount
+                    except Exception as e:
+                        if log:
+                            log.warning("db update %s: %s", table, e)
+                        stats["errors"] += 1
+            _db.conn.commit()
+        except Exception as e:
+            if log:
+                log.warning("migrate_dirs_v1 db update failed: %s", e)
+            stats["errors"] += 1
+
+    if _db is not None:
+        try:
+            _db.set_setting(_DIRS_MIGRATION_FLAG, "1")
         except Exception:
             pass
     return stats

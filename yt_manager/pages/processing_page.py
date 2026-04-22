@@ -255,9 +255,10 @@ def _pick_random_video(folder: str) -> Optional[str]:
     return random.choice(files) if files else None
 
 def _scan_project_folders() -> dict:
-    """Возвращает {папка_название: [список файлов]} из downloads/ и processed/."""
+    """Возвращает {папка_название: [список файлов]} из загрузки/обработанное/нарезки."""
+    from utils import DIR_DOWNLOADS, DIR_PROCESSED, DIR_CLIPS
     result = {}
-    for base in ['downloads', 'processed', 'clips']:
+    for base in [DIR_DOWNLOADS, DIR_PROCESSED, DIR_CLIPS]:
         base_path = os.path.join(BASE_DIR, base)
         if not os.path.isdir(base_path):
             continue
@@ -1160,10 +1161,10 @@ class CleanupPanel(QFrame):
         lay.addWidget(_hdiv())
         lay.addWidget(_lbl('После завершения нарезки автоматически удалять:', 'hint'))
 
-        self._del_downloaded = QCheckBox('Удалять скачанные видео (downloads/)')
+        self._del_downloaded = QCheckBox('Удалять скачанные видео (загрузки/)')
         self._del_downloaded.setObjectName('chk')
         self._del_downloaded.setToolTip(
-            'Удалить исходные файлы из папки downloads/ после того, как нарезка завершена'
+            'Удалить исходные файлы из папки загрузки/ после того, как нарезка завершена'
         )
         lay.addWidget(self._del_downloaded)
 
