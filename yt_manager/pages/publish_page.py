@@ -14,7 +14,7 @@ import logging
 import os
 from datetime import datetime
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import (
     QFrame, QHBoxLayout, QHeaderView, QLabel, QListWidget, QListWidgetItem,
@@ -42,6 +42,11 @@ class PublishPage(BasePage):
         self._current_id: int | None = None
         self._build_ui()
         self.refresh()
+        # Авто-обновление списка (клипы могут подоспеть, пока страница открыта)
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setInterval(5000)
+        self._refresh_timer.timeout.connect(self.refresh)
+        self._refresh_timer.start()
 
     # ── UI ─────────────────────────────────────────────────────────
     def _build_ui(self):
@@ -97,6 +102,19 @@ class PublishPage(BasePage):
         blay.addWidget(btn_go)
         self.banner.hide()
         lay.addWidget(self.banner)
+
+        # Панель инструментов над таблицей
+        tools = QHBoxLayout()
+        tools.setContentsMargins(0, 0, 0, 0)
+        tools.addStretch()
+        btn_recount = QPushButton("Пересчитать статусы")
+        btn_recount.setToolTip(
+            "Проверяет фактическое состояние клипов: если файл на диске "
+            "есть, а скрипт не отмечен 'Готово' — клип возвращается в 'ready'."
+        )
+        btn_recount.clicked.connect(self._on_recount)
+        tools.addWidget(btn_recount)
+        lay.addLayout(tools)
 
         # Таблица скриптов
         self.tbl = QTableWidget(0, 5)
@@ -213,3 +231,21 @@ class PublishPage(BasePage):
     def _emit_open_automation(self):
         if self._current_id:
             self.request_open_automation.emit(self._current_id)
+
+    def _on_recount(self):
+        if not self._current_id:
+            QMessageBox.information(
+                self, "Пересчёт статусов",
+                "Выберите TikTok-канал слева."
+            )
+            return
+        stats = db.recount_clip_statuses(self._current_id)
+        QMessageBox.information(
+            self, "Пересчёт статусов",
+            f"Возвращено в ready: {stats['to_ready']}\n"
+            f"Помечено published: {stats['to_published']}\n"
+            f"Файл не найден: {stats['missing']}"
+        )
+        log.info("publish: recount tiktok_id=%s → %s", self._current_id, stats)
+        self.refresh()
+        self._refresh_table()

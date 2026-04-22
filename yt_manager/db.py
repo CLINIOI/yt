@@ -1121,6 +1121,44 @@ class Database:
         self.conn.execute("DELETE FROM clips WHERE id = ?", (int(clip_id),))
         self._commit()
 
+    def recount_clip_statuses(self, tiktok_id: int) -> dict:
+        """Пересчитывает статусы клипов по фактам публикации:
+        клип считается published только если есть publish_script со
+        status='done', ссылающийся на него. Остальные клипы с файлом
+        на диске возвращаются в 'ready'. Возвращает статистику."""
+        tid = int(tiktok_id)
+        published_ids = {
+            r["clip_id"] for r in self.conn.execute(
+                "SELECT DISTINCT clip_id FROM publish_scripts "
+                "WHERE tiktok_id = ? AND status = 'done' AND clip_id IS NOT NULL",
+                (tid,)
+            ).fetchall()
+        }
+        rows = self.conn.execute(
+            "SELECT id, file_path, status FROM clips WHERE tiktok_id = ?",
+            (tid,)
+        ).fetchall()
+        to_ready, to_pub, missing = 0, 0, 0
+        for r in rows:
+            cid, fp, st = r["id"], r["file_path"], r["status"]
+            on_disk = bool(fp) and os.path.exists(fp)
+            if cid in published_ids:
+                if st != "published":
+                    self.conn.execute(
+                        "UPDATE clips SET status='published' WHERE id=?", (cid,)
+                    )
+                    to_pub += 1
+            elif on_disk:
+                if st != "ready":
+                    self.conn.execute(
+                        "UPDATE clips SET status='ready' WHERE id=?", (cid,)
+                    )
+                    to_ready += 1
+            else:
+                missing += 1
+        self._commit()
+        return {"to_ready": to_ready, "to_published": to_pub, "missing": missing}
+
     # ─────────────────────────────────────────────────────────────────
     # СКРИПТЫ ПУБЛИКАЦИИ
     # ─────────────────────────────────────────────────────────────────

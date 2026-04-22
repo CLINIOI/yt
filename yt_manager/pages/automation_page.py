@@ -472,12 +472,23 @@ class AutoPipelineWorker(QThread):
         return ch.get("title") or ch.get("url") or f"#{self.channel_id}"
 
     def _enough_clips(self, tt_list: list) -> bool:
+        """Возвращает True, только если у ВСЕХ привязанных TikTok
+        число ready-клипов не ниже буфера. Пишет детальный лог по каждому."""
+        all_enough = True
         for tt in tt_list:
             ready = db.count_ready_clips(int(tt["id"]))
             buf = int(tt.get("clip_min_buffer") or 10)
+            handle = tt.get("handle") or tt.get("username") or f"#{tt['id']}"
             if ready < buf:
-                return False
-        return True
+                self.log.emit(
+                    f"TikTok @{handle}: {ready} ready / {buf} нужно → качаем."
+                )
+                all_enough = False
+            else:
+                self.log.emit(
+                    f"TikTok @{handle}: {ready} ready / {buf} нужно → достаточно."
+                )
+        return all_enough
 
     # ── Шаги ───────────────────────────────────────────────────────
 
