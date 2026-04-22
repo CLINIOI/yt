@@ -1,0 +1,61 @@
+/* light.qss — Светлая тема YT Manager */
+
+QMainWindow, QWidget#central { background: #f6f5f2; }
+
+/* ── SIDEBAR ── */
+QFrame#sidebar { background: #ecebe7; border-right: 1px solid #d8d6d1; }
+
+QLabel#app_logo {
+    color: #2c6d77; font-size: 20px; font-weight: 700;
+    letter-spacing: 1px; padding: 0 20px;
+}
+QLabel#app_sub  { color: #8a8985; padding: 0 20px; font-size: 10px; }
+
+QFrame#sidebar_div {
+    background: #d8d6d1; border: none;
+    max-height: 1px; margin: 4px 16px;
+}
+
+QLabel#nav_section {
+    color: #8a8985; font-size: 10px;
+    letter-spacing: 1.5px; padding: 0 20px;
+}
+
+QPushButton#nav_btn {
+    background: transparent; border: none; border-radius: 8px;
+    color: #4a4845; font-size: 13px;
+    text-align: left; padding: 10px 16px;
+    margin: 1px 8px;
+}
+QPushButton#nav_btn:hover   { background: #e0ded9; color: #1c1b19; }
+QPushButton#nav_btn:checked { background: #d2e6e9; color: #2c6d77; font-weight: 600; }
+
+/* ── Кнопка Typewriter — особый акцент ── */
+QPushButton#nav_btn_tw {
+    background: transparent; border: none; border-radius: 8px;
+    color: #4a4845; font-size: 13px;
+    text-align: left; padding: 10px 16px;
+    margin: 1px 8px;
+}
+QPushButton#nav_btn_tw:hover   { background: #e0ded9; color: #1c1b19; }
+QPushButton#nav_btn_tw:checked {
+    background: #d2e6e9; color: #2c6d77; font-weight: 600;
+    border-left: 3px solid #2c6d77;
+}
+
+/* ── СТАТУСНАЯ ПАНЕЛЬ САЙДБАРА ── */
+QFrame#sidebar_status { background: #f6f5f2; border-top: 1px solid #d8d6d1; }
+QLabel#status_tool    { color: #8a8985; font-size: 11px; }
+QLabel#status_tool[ok="true"]  { color: #437a22; }
+QLabel#status_tool[ok="false"] { color: #964219; }
+
+/* Счётчик загрузок */
+QLabel#dl_counter { color: #8a8985; font-size: 11px; padding: 0 20px; }
+QLabel#dl_counter[active="true"] { color: #2c6d77; }
+
+QLabel#version_label { color: #b8b6b1; font-size: 10px; padding: 0 20px; }
+
+/* ── STATUSBAR ── */
+QStatusBar { background: #ecebe7; color: #4a4845; font-size: 11px;
+             border-top: 1px solid #d8d6d1; }
+QStatusBar::item { border: none; }

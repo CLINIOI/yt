@@ -454,7 +454,7 @@ class AddChannelDialog(QDialog):
         lay.addWidget(self.url_input)
         lay.addSpacing(14)
 
-        hint_tt = QLabel("TikTok аккаунт (обязательно)")
+        hint_tt = QLabel("TikTok аккаунт (необязательно)")
         hint_tt.setObjectName("dlg_hint")
         lay.addWidget(hint_tt)
         lay.addSpacing(6)

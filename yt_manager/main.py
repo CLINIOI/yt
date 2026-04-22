@@ -123,7 +123,12 @@ def main():
         if not should_start:
             sys.exit(0)
     except Exception:
-        pass  # если startup_check недоступен — продолжаем
+        # startup_check недоступен или упал — продолжаем,
+        # но логируем причину, чтобы не молчать о реальной ошибке.
+        import logging
+        logging.getLogger(__name__).exception(
+            "startup_check failed — продолжаем без проверки окружения"
+        )
 
     # 5. БД
     try:

@@ -32,72 +32,21 @@ from pages.typewriter_page  import TypewriterPage
 
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+THEMES_DIR  = os.path.join(BASE_DIR, "assets", "themes")
 
 # ──────────────────────────────────────────────────────────────────────
-# QSS
+# QSS темы (файлы в assets/themes/{dark,light}.qss)
 # ──────────────────────────────────────────────────────────────────────
 
-DARK_THEME = """
-QMainWindow, QWidget#central { background: #171614; }
 
-/* ── SIDEBAR ── */
-QFrame#sidebar { background: #1c1b19; border-right: 1px solid #2d2c2a; }
-
-QLabel#app_logo {
-    color: #4f98a3; font-size: 20px; font-weight: 700;
-    letter-spacing: 1px; padding: 0 20px;
-}
-QLabel#app_sub  { color: #5a5957; font-size: 10px; padding: 0 20px; }
-
-QFrame#sidebar_div {
-    background: #2d2c2a; border: none;
-    max-height: 1px; margin: 4px 16px;
-}
-
-QLabel#nav_section {
-    color: #5a5957; font-size: 10px;
-    letter-spacing: 1.5px; padding: 0 20px;
-}
-
-QPushButton#nav_btn {
-    background: transparent; border: none; border-radius: 8px;
-    color: #797876; font-size: 13px;
-    text-align: left; padding: 10px 16px;
-    margin: 1px 8px;
-}
-QPushButton#nav_btn:hover   { background: #22211f; color: #cdccca; }
-QPushButton#nav_btn:checked { background: #253535; color: #4f98a3; font-weight: 600; }
-
-/* ── Кнопка Typewriter — особый акцент ── */
-QPushButton#nav_btn_tw {
-    background: transparent; border: none; border-radius: 8px;
-    color: #797876; font-size: 13px;
-    text-align: left; padding: 10px 16px;
-    margin: 1px 8px;
-}
-QPushButton#nav_btn_tw:hover   { background: #22211f; color: #cdccca; }
-QPushButton#nav_btn_tw:checked {
-    background: #1a2a35; color: #4f98a3; font-weight: 600;
-    border-left: 3px solid #4f98a3;
-}
-
-/* ── СТАТУСНАЯ ПАНЕЛЬ САЙДБАРА ── */
-QFrame#sidebar_status { background: #171614; border-top: 1px solid #2d2c2a; }
-QLabel#status_tool    { color: #3a3937; font-size: 11px; }
-QLabel#status_tool[ok="true"]  { color: #437a22; }
-QLabel#status_tool[ok="false"] { color: #964219; }
-
-/* Счётчик загрузок */
-QLabel#dl_counter { color: #5a5957; font-size: 11px; padding: 0 20px; }
-QLabel#dl_counter[active="true"] { color: #4f98a3; }
-
-QLabel#version_label { color: #3a3937; font-size: 10px; padding: 0 20px; }
-
-/* ── STATUSBAR ── */
-QStatusBar { background: #1c1b19; color: #5a5957; font-size: 11px;
-             border-top: 1px solid #2d2c2a; }
-QStatusBar::item { border: none; }
-"""
+def _load_theme_qss(name: str) -> str:
+    """Читает файл assets/themes/<name>.qss. При ошибке возвращает ''."""
+    path = os.path.join(THEMES_DIR, f"{name}.qss")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return ""
 
 NAV_ITEMS = [
     ("📺", "  YouTube каналы", 0, "nav_btn"),
@@ -130,7 +79,12 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._connect_signals()
-        self.setStyleSheet(DARK_THEME)
+        try:
+            from db import db
+            self._theme = db.get_setting("theme", "dark") or "dark"
+        except Exception:
+            self._theme = "dark"
+        self.apply_theme(self._theme)
         self._restore_geometry()
 
         # Открываем первую страницу
@@ -330,6 +284,21 @@ class MainWindow(QMainWindow):
 
         if hasattr(self.page_channels, "download_finished"):
             self.page_channels.download_finished.connect(self._on_download_finished)
+
+        if hasattr(self.page_settings, "theme_changed"):
+            self.page_settings.theme_changed.connect(self.apply_theme)
+
+    # ── ТЕМА ──────────────────────────────────────────────────────────
+    def apply_theme(self, name: str):
+        """Загружает QSS-файл темы и применяет к приложению."""
+        from PyQt6.QtWidgets import QApplication
+        qss = _load_theme_qss(name) or _load_theme_qss("dark")
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(qss)
+        else:
+            self.setStyleSheet(qss)
+        self._theme = name
 
     # ── СЛОТЫ ─────────────────────────────────────────────────────────
     def _navigate(self, idx: int):
