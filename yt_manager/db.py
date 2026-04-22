@@ -248,11 +248,15 @@ class Database:
             )
         """)
 
-        # ── Настройки автоматизации (1 к 1 с tiktok_channels) ───────
+        # ── Настройки автоматизации (1 к 1 с YouTube-каналом) ───────
+        # Миграция: если таблица уже существует со старой схемой (tiktok_id)
+        # — переносим записи на все привязанные YouTube-каналы через
+        # tiktok_youtube_link, затем пересоздаём таблицу.
+        self._migrate_automation_settings(cur)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS automation_settings (
-                tiktok_id           INTEGER PRIMARY KEY
-                                    REFERENCES tiktok_channels(id) ON DELETE CASCADE,
+                channel_id          INTEGER PRIMARY KEY
+                                    REFERENCES channels(id) ON DELETE CASCADE,
                 download_enabled    INTEGER DEFAULT 1,
                 min_duration_sec    INTEGER DEFAULT 300,
                 max_duration_sec    INTEGER DEFAULT 1800,
@@ -283,6 +287,101 @@ class Database:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_videos_channel_status ON videos(channel_id, status)")
 
         self._commit()
+
+    # ─────────────────────────────────────────────────────────────────
+    # МИГРАЦИИ
+    # ─────────────────────────────────────────────────────────────────
+
+    def _migrate_automation_settings(self, cur) -> None:
+        """Неразрушающая миграция automation_settings: tiktok_id → channel_id.
+
+        Если таблица уже существует со старой схемой (PK = tiktok_id),
+        создаём automation_settings_new со схемой по channel_id, переносим
+        данные: для каждой старой записи тянем список привязанных
+        YouTube-каналов (tiktok_youtube_link) и копируем настройки на
+        каждый из них. Затем DROP старой и RENAME новой.
+        """
+        try:
+            info = cur.execute("PRAGMA table_info(automation_settings)").fetchall()
+        except Exception:
+            return
+        if not info:
+            return  # таблицы ещё нет — будет создана сразу в новой схеме
+        cols = [c[1] for c in info]
+        if "channel_id" in cols:
+            return  # уже мигрировано
+        if "tiktok_id" not in cols:
+            return
+
+        try:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS automation_settings_new (
+                    channel_id          INTEGER PRIMARY KEY
+                                        REFERENCES channels(id) ON DELETE CASCADE,
+                    download_enabled    INTEGER DEFAULT 1,
+                    min_duration_sec    INTEGER DEFAULT 300,
+                    max_duration_sec    INTEGER DEFAULT 1800,
+                    max_age_days        INTEGER DEFAULT 7,
+                    fallback_popular    INTEGER DEFAULT 1,
+                    processing_enabled  INTEGER DEFAULT 1,
+                    banner_dir          TEXT,
+                    retention_dir       TEXT,
+                    background_dir      TEXT,
+                    clip_duration_sec   INTEGER DEFAULT 30,
+                    publish_enabled     INTEGER DEFAULT 1,
+                    updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            rows = cur.execute("SELECT * FROM automation_settings").fetchall()
+            for row in rows:
+                d = dict(row)
+                tt_id = d.get("tiktok_id")
+                if not tt_id:
+                    continue
+                yt_ids = [r[0] for r in cur.execute(
+                    "SELECT youtube_id FROM tiktok_youtube_link WHERE tiktok_id = ?",
+                    (int(tt_id),)
+                ).fetchall()]
+                for yt_id in yt_ids:
+                    cur.execute("""
+                        INSERT OR REPLACE INTO automation_settings_new (
+                            channel_id, download_enabled, min_duration_sec,
+                            max_duration_sec, max_age_days, fallback_popular,
+                            processing_enabled, banner_dir, retention_dir,
+                            background_dir, clip_duration_sec, publish_enabled,
+                            updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        int(yt_id),
+                        int(d.get("download_enabled") or 1),
+                        int(d.get("min_duration_sec") or 300),
+                        int(d.get("max_duration_sec") or 1800),
+                        int(d.get("max_age_days") or 7),
+                        int(d.get("fallback_popular") or 1),
+                        int(d.get("processing_enabled") or 1),
+                        d.get("banner_dir"),
+                        d.get("retention_dir"),
+                        d.get("background_dir"),
+                        int(d.get("clip_duration_sec") or 30),
+                        int(d.get("publish_enabled") or 1),
+                        d.get("updated_at") or datetime.now().isoformat(),
+                    ))
+
+            cur.execute("DROP TABLE automation_settings")
+            cur.execute("ALTER TABLE automation_settings_new RENAME TO automation_settings")
+        except Exception as e:
+            try:
+                import logging
+                logging.getLogger(__name__).exception(
+                    "Миграция automation_settings не удалась: %s", e
+                )
+            except Exception:
+                pass
+            try:
+                cur.execute("DROP TABLE IF EXISTS automation_settings_new")
+            except Exception:
+                pass
 
     # ─────────────────────────────────────────────────────────────────
     # КАНАЛЫ
@@ -1002,40 +1101,49 @@ class Database:
         "publish_enabled": 1,
     }
 
-    def get_automation_settings(self, tiktok_id: int) -> dict:
-        """Возвращает настройки автоматизации; создаёт дефолтные если нет."""
+    def get_automation_settings(self, channel_id: int) -> dict:
+        """Возвращает настройки автоматизации для YouTube-канала;
+        создаёт дефолтные если нет."""
         row = self.conn.execute(
-            "SELECT * FROM automation_settings WHERE tiktok_id = ?",
-            (int(tiktok_id),)
+            "SELECT * FROM automation_settings WHERE channel_id = ?",
+            (int(channel_id),)
         ).fetchone()
         if row:
             return dict(row)
         self.conn.execute(
-            "INSERT INTO automation_settings (tiktok_id) VALUES (?)",
-            (int(tiktok_id),)
+            "INSERT INTO automation_settings (channel_id) VALUES (?)",
+            (int(channel_id),)
         )
         self._commit()
         row = self.conn.execute(
-            "SELECT * FROM automation_settings WHERE tiktok_id = ?",
-            (int(tiktok_id),)
+            "SELECT * FROM automation_settings WHERE channel_id = ?",
+            (int(channel_id),)
         ).fetchone()
         return dict(row)
 
-    def set_automation_settings(self, tiktok_id: int, **fields) -> bool:
+    def set_automation_settings(self, channel_id: int, **fields) -> bool:
         allowed = set(self._AUTO_DEFAULTS.keys())
         data = {k: v for k, v in fields.items() if k in allowed}
         if not data:
             return False
-        self.get_automation_settings(int(tiktok_id))  # гарантируем запись
+        self.get_automation_settings(int(channel_id))  # гарантируем запись
         data["updated_at"] = datetime.now().isoformat()
         set_clause = ", ".join(f"{k} = ?" for k in data)
-        values = list(data.values()) + [int(tiktok_id)]
+        values = list(data.values()) + [int(channel_id)]
         self.conn.execute(
-            f"UPDATE automation_settings SET {set_clause} WHERE tiktok_id = ?",
+            f"UPDATE automation_settings SET {set_clause} WHERE channel_id = ?",
             values
         )
         self._commit()
         return True
+
+    def get_tiktok_for_channel(self, channel_id: int) -> list:
+        """Возвращает список id TikTok-каналов, привязанных к YouTube-каналу."""
+        rows = self.conn.execute(
+            "SELECT tiktok_id FROM tiktok_youtube_link WHERE youtube_id = ?",
+            (int(channel_id),)
+        ).fetchall()
+        return [int(r[0]) for r in rows]
 
     # ─────────────────────────────────────────────────────────────────
     # НАСТРОЙКИ ПРИЛОЖЕНИЯ (key/value)
