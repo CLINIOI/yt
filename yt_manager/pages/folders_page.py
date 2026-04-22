@@ -1623,8 +1623,17 @@ class FoldersPage(BasePage):
         self._watcher = QFileSystemWatcher(self)
         self._tab_pages: dict[str, FolderTabPage] = {}
         self._build_ui()
-        self.setStyleSheet(PAGE_STYLE)
+        self._apply_page_style_for_theme()
         QTimer.singleShot(200, self._initial_load)
+
+    def _apply_page_style_for_theme(self):
+        """PAGE_STYLE — только для тёмной темы; иначе глобальный QSS."""
+        try:
+            from db import db as _db
+            theme = (_db.get_setting("theme", "dark") or "dark").strip().lower()
+        except Exception:
+            theme = "dark"
+        self.setStyleSheet(PAGE_STYLE if theme == "dark" else "")
 
     def _build_ui(self):
         root = QVBoxLayout(self)

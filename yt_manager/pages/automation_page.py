@@ -772,13 +772,13 @@ class AutomationPage(BasePage):
         top.addWidget(self.cmb_channel)
         top.addStretch()
         self.lbl_status = QLabel("")
-        self.lbl_status.setStyleSheet("color: #5a5957;")
+        self.lbl_status.setObjectName("auto_hint")
         top.addWidget(self.lbl_status)
         root.addLayout(top)
 
         tt_row = QHBoxLayout()
         self.lbl_tiktoks = QLabel("")
-        self.lbl_tiktoks.setStyleSheet("color: #5a5957;")
+        self.lbl_tiktoks.setObjectName("auto_hint")
         self.lbl_tiktoks.setWordWrap(True)
         tt_row.addWidget(self.lbl_tiktoks, 1)
         self.btn_link_tt = QPushButton("Привязать TikTok…")
@@ -817,9 +817,7 @@ class AutomationPage(BasePage):
 
         self.lbl_auto_state = QLabel("● Остановлено")
         self.lbl_auto_state.setObjectName("auto_state")
-        self.lbl_auto_state.setStyleSheet(
-            "font-size: 14px; font-weight: 600; color: #964219;"
-        )
+        self.lbl_auto_state.setProperty("state", "off")
         lay.addWidget(self.lbl_auto_state)
         lay.addStretch()
 
@@ -837,20 +835,13 @@ class AutomationPage(BasePage):
         """Окрашивает большую кнопку: зелёная — запуск, красная — стоп."""
         if active:
             self.btn_auto_toggle.setText("⏸ Остановить автоматизацию")
-            self.btn_auto_toggle.setStyleSheet(
-                "QPushButton#auto_toggle{"
-                " background:#a83232;color:white;font-weight:700;"
-                " font-size:13px;border-radius:8px;padding:8px 14px;}"
-                "QPushButton#auto_toggle:hover{background:#bf3a3a;}"
-            )
+            self.btn_auto_toggle.setProperty("state", "on")
         else:
             self.btn_auto_toggle.setText("▶ Запустить автоматизацию")
-            self.btn_auto_toggle.setStyleSheet(
-                "QPushButton#auto_toggle{"
-                " background:#2f7a3a;color:white;font-weight:700;"
-                " font-size:13px;border-radius:8px;padding:8px 14px;}"
-                "QPushButton#auto_toggle:hover{background:#388f47;}"
-            )
+            self.btn_auto_toggle.setProperty("state", "off")
+        # Смена property требует переполировки, чтобы QSS применился
+        self.btn_auto_toggle.style().unpolish(self.btn_auto_toggle)
+        self.btn_auto_toggle.style().polish(self.btn_auto_toggle)
 
     def _build_filters_group(self) -> QGroupBox:
         g = QGroupBox("Фильтры видео")
@@ -1139,19 +1130,15 @@ class AutomationPage(BasePage):
                       self._active_pipelines[self._current_channel].isRunning()
             if running:
                 self.lbl_auto_state.setText("● Работает — пайплайн активен")
-                self.lbl_auto_state.setStyleSheet(
-                    "font-size: 14px; font-weight: 600; color: #4f98a3;"
-                )
+                self.lbl_auto_state.setProperty("state", "running")
             else:
                 self.lbl_auto_state.setText("● Работает — ждёт триггера")
-                self.lbl_auto_state.setStyleSheet(
-                    "font-size: 14px; font-weight: 600; color: #437a22;"
-                )
+                self.lbl_auto_state.setProperty("state", "waiting")
         else:
             self.lbl_auto_state.setText("● Остановлено")
-            self.lbl_auto_state.setStyleSheet(
-                "font-size: 14px; font-weight: 600; color: #964219;"
-            )
+            self.lbl_auto_state.setProperty("state", "off")
+        self.lbl_auto_state.style().unpolish(self.lbl_auto_state)
+        self.lbl_auto_state.style().polish(self.lbl_auto_state)
 
     def _save_settings(self):
         if not self._current_channel:

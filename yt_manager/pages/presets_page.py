@@ -505,8 +505,17 @@ class PresetsPage(BasePage):
         self._unsaved = False
         self._card_map: dict[int, PresetCardWidget] = {}   # list_row → card
         self._build_ui()
-        self.setStyleSheet(PAGE_STYLE)
+        self._apply_page_style_for_theme()
         self._load_presets()
+
+    def _apply_page_style_for_theme(self):
+        """PAGE_STYLE — только для тёмной темы; иначе глобальный QSS."""
+        try:
+            from db import db as _db
+            theme = (_db.get_setting("theme", "dark") or "dark").strip().lower()
+        except Exception:
+            theme = "dark"
+        self.setStyleSheet(PAGE_STYLE if theme == "dark" else "")
 
     def _build_ui(self):
         root = QVBoxLayout(self)

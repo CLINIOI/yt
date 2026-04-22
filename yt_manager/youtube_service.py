@@ -436,6 +436,26 @@ class YouTubeService:
                 if limit > 0 and len(result) >= limit:
                     break
 
+            # Дозапрос view_count/upload_date для видео, у которых поля пусты.
+            # extract_flat="in_playlist" не возвращает эти поля, поэтому дотягиваем выборочно.
+            # Ограничено, чтобы не бить YouTube и не термозить UI.
+            BACKFILL_MAX = 30
+            missing = [v for v in result
+                       if (not v.view_count and not v.upload_date)]
+            if missing:
+                for v in missing[:BACKFILL_MAX]:
+                    try:
+                        full = self.get_video_info(v.yt_id)
+                        if full is not None:
+                            if full.view_count and not v.view_count:
+                                v.view_count = full.view_count
+                            if full.upload_date and not v.upload_date:
+                                v.upload_date = full.upload_date
+                            if full.duration and not v.duration:
+                                v.duration = full.duration
+                    except Exception:
+                        log.exception("backfill video meta failed for %s", v.yt_id)
+
             return result
 
         except yt_dlp.utils.DownloadError as e:

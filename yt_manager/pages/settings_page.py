@@ -16,11 +16,23 @@ from typing import Optional
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QFileDialog, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
     QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton,
-    QSpinBox, QVBoxLayout, QWidget,
+    QScrollArea, QSizePolicy, QSpinBox, QVBoxLayout, QWidget,
 )
+
+
+def _as_bool(v) -> bool:
+    """Универсальное приведение значения настройки к bool."""
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return False
+    if isinstance(v, (int, float)):
+        return bool(v)
+    s = str(v).strip().lower()
+    return s in ("1", "true", "yes", "on", "да")
 
 from pages.base_page import BasePage
 from db import db
@@ -189,18 +201,50 @@ class SettingsPage(BasePage):
     PAGE_TITLE = "Настройки"
 
     theme_changed = pyqtSignal(str)  # испускается при смене темы
+    bridge_toggle_requested = pyqtSignal(bool)  # включить/выключить TikTok Bridge
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._full_refresh_thread: Optional[QThread] = None
         self._build_ui()
         self.refresh()
 
     # ── UI ─────────────────────────────────────────────────────────
     def _build_ui(self):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(16, 16, 16, 16)
-        root.setSpacing(12)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
+        # Заголовок страницы
+        header = QWidget()
+        header.setObjectName("page_header")
+        hlay = QVBoxLayout(header)
+        hlay.setContentsMargins(24, 20, 24, 12)
+        hlay.setSpacing(2)
+        title = QLabel("Настройки")
+        title.setObjectName("page_heading")
+        hlay.addWidget(title)
+        subtitle = QLabel(
+            "Управление диском, куками YouTube, темой оформления, "
+            "TikTok Bridge и обслуживанием данных."
+        )
+        subtitle.setObjectName("page_subtitle")
+        subtitle.setWordWrap(True)
+        hlay.addWidget(subtitle)
+        outer.addWidget(header)
+
+        # Прокручиваемая область с группами
+        scroll = QScrollArea()
+        scroll.setObjectName("settings_scroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        content.setObjectName("settings_content")
+        root = QVBoxLayout(content)
+        root.setContentsMargins(24, 8, 24, 16)
+        root.setSpacing(14)
+
+        root.addWidget(self._build_maintenance_group())
         root.addWidget(self._build_disk_group())
         root.addWidget(self._build_cookies_group())
         root.addWidget(self._build_publish_group())
@@ -212,9 +256,72 @@ class SettingsPage(BasePage):
         bar = QHBoxLayout()
         bar.addStretch()
         btn_save = QPushButton("Сохранить настройки")
+        btn_save.setObjectName("btn_primary")
+        btn_save.setMinimumHeight(34)
         btn_save.clicked.connect(self._save_all)
         bar.addWidget(btn_save)
         root.addLayout(bar)
+
+        scroll.setWidget(content)
+        outer.addWidget(scroll, 1)
+
+    def _build_maintenance_group(self) -> QGroupBox:
+        """Группа «Обслуживание» — кнопка полного обновления данных."""
+        g = QGroupBox("Обслуживание")
+        lay = QVBoxLayout(g)
+
+        hint = QLabel(
+            "«Полное обновление» — сброс видео со статусом «ошибка» в «новые», "
+            "пересчёт готовых/опубликованных клипов, регенерация скриптов публикации, "
+            "обновление счётчиков TikTok-каналов."
+        )
+        hint.setWordWrap(True)
+        hint.setObjectName("settings_hint")
+        lay.addWidget(hint)
+
+        row = QHBoxLayout()
+        self.btn_full_refresh = QPushButton("Полное обновление")
+        self.btn_full_refresh.setObjectName("btn_primary")
+        self.btn_full_refresh.setMinimumHeight(32)
+        self.btn_full_refresh.clicked.connect(self._run_full_refresh)
+        row.addWidget(self.btn_full_refresh)
+
+        self.lbl_full_refresh_status = QLabel("")
+        self.lbl_full_refresh_status.setObjectName("settings_status")
+        self.lbl_full_refresh_status.setWordWrap(True)
+        row.addWidget(self.lbl_full_refresh_status, 1)
+        lay.addLayout(row)
+        return g
+
+    def _run_full_refresh(self):
+        """Запускает db.full_refresh_all() и показывает сводку."""
+        self.btn_full_refresh.setEnabled(False)
+        self.lbl_full_refresh_status.setProperty("state", "info")
+        self.lbl_full_refresh_status.setText("Выполняется полное обновление…")
+        self.lbl_full_refresh_status.style().unpolish(self.lbl_full_refresh_status)
+        self.lbl_full_refresh_status.style().polish(self.lbl_full_refresh_status)
+        QApplication.processEvents()
+        try:
+            report = db.full_refresh_all()
+            parts = [
+                f"сброшено ошибок: {report.get('errors_reset', 0)}",
+                f"клипов → готово: {report.get('clips_to_ready', 0)}",
+                f"клипов → опубликовано: {report.get('clips_to_published', 0)}",
+                f"потерянные файлы: {report.get('clips_missing', 0)}",
+                f"скриптов создано: {report.get('scripts_created', 0)}",
+                f"каналов YT обновлено: {report.get('channels_updated', 0)}",
+                f"каналов TT: {report.get('tiktok_channels', 0)}",
+            ]
+            self.lbl_full_refresh_status.setProperty("state", "ok")
+            self.lbl_full_refresh_status.setText("✓ " + "; ".join(parts))
+        except Exception as e:
+            log.exception("full_refresh_all failed")
+            self.lbl_full_refresh_status.setProperty("state", "err")
+            self.lbl_full_refresh_status.setText(f"✗ Ошибка: {e}")
+        finally:
+            self.lbl_full_refresh_status.style().unpolish(self.lbl_full_refresh_status)
+            self.lbl_full_refresh_status.style().polish(self.lbl_full_refresh_status)
+            self.btn_full_refresh.setEnabled(True)
 
     def _build_disk_group(self) -> QGroupBox:
         g = QGroupBox("Диск")
@@ -236,7 +343,7 @@ class SettingsPage(BasePage):
         row.addWidget(btn)
         row.addStretch()
         self.lbl_disk_status = QLabel("")
-        self.lbl_disk_status.setStyleSheet("color:#5a5957;")
+        self.lbl_disk_status.setObjectName("settings_hint")
         row.addWidget(self.lbl_disk_status)
         lay.addLayout(row)
         return g
@@ -251,7 +358,7 @@ class SettingsPage(BasePage):
             "должен быть установлен на этом же компьютере."
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet("color:#8a8985; font-size:11px;")
+        hint.setObjectName("settings_hint")
         lay.addWidget(hint)
 
         self.rb_cookies_auto    = QRadioButton("Автоматически (cookies.txt рядом с проектом → браузер)")
@@ -306,9 +413,7 @@ class SettingsPage(BasePage):
         # Подсказка с реально применяемыми куками
         self.lbl_applied_cookies = QLabel("")
         self.lbl_applied_cookies.setWordWrap(True)
-        self.lbl_applied_cookies.setStyleSheet(
-            "color:#4f98a3; font-size:11px; font-weight:600;"
-        )
+        self.lbl_applied_cookies.setObjectName("settings_accent")
         lay.addWidget(self.lbl_applied_cookies)
 
         row_test = QHBoxLayout()
@@ -385,7 +490,10 @@ class SettingsPage(BasePage):
         # Сохраняем текущие настройки, чтобы тест использовал их
         self._save_cookies_settings()
         self.btn_cookies_test.setEnabled(False)
-        self.lbl_cookies_status.setStyleSheet("color:#8a8985;")
+        self.lbl_cookies_status.setObjectName("settings_status")
+        self.lbl_cookies_status.setProperty("state", "info")
+        self.lbl_cookies_status.style().unpolish(self.lbl_cookies_status)
+        self.lbl_cookies_status.style().polish(self.lbl_cookies_status)
         self.lbl_cookies_status.setText("Проверка…")
         self._cookies_test_worker = CookiesTestWorker(
             mode=self._current_cookies_mode(),
@@ -401,12 +509,15 @@ class SettingsPage(BasePage):
         self._cookies_test_worker.start()
 
     def _on_cookies_report(self, ok: bool, report: str):
+        self.lbl_cookies_status.setObjectName("settings_status")
         if ok:
-            self.lbl_cookies_status.setStyleSheet("color:#2e8b57; font-weight:700;")
+            self.lbl_cookies_status.setProperty("state", "ok")
             self.lbl_cookies_status.setText("✓ Куки работают (см. детали)")
         else:
-            self.lbl_cookies_status.setStyleSheet("color:#d64545; font-weight:700;")
+            self.lbl_cookies_status.setProperty("state", "err")
             self.lbl_cookies_status.setText("✗ Проверка не прошла (см. детали)")
+        self.lbl_cookies_status.style().unpolish(self.lbl_cookies_status)
+        self.lbl_cookies_status.style().polish(self.lbl_cookies_status)
         # Показываем подробный отчёт в прокручиваемом окне
         self._show_cookies_report_dialog(ok, report)
 
@@ -416,10 +527,7 @@ class SettingsPage(BasePage):
         dlg.resize(720, 440)
         v = QVBoxLayout(dlg)
         title = QLabel("✓ Успешно" if ok else "✗ Ошибка")
-        title.setStyleSheet(
-            "color:#2e8b57; font-weight:700; font-size:14px;" if ok
-            else "color:#d64545; font-weight:700; font-size:14px;"
-        )
+        title.setObjectName("dlg_title_ok" if ok else "dlg_title_err")
         v.addWidget(title)
         te = QPlainTextEdit()
         te.setReadOnly(True)
@@ -485,7 +593,7 @@ class SettingsPage(BasePage):
         g = QGroupBox("Тема оформления")
         outer = QVBoxLayout(g)
         hint = QLabel("Клик по карточке — тема применится мгновенно.")
-        hint.setStyleSheet("color:#8a8985; font-size:11px;")
+        hint.setObjectName("settings_hint")
         outer.addWidget(hint)
 
         grid = QGridLayout()
@@ -537,7 +645,7 @@ class SettingsPage(BasePage):
         v.addWidget(preview)
 
         hint = QLabel(f"{bg} · {accent}")
-        hint.setStyleSheet("color:#8a8985; font-size:10px; background:transparent;")
+        hint.setObjectName("theme_card_hint")
         v.addWidget(hint)
 
         card.mousePressEvent = lambda e, n=name: self._on_theme_card_clicked(n)
@@ -560,6 +668,29 @@ class SettingsPage(BasePage):
     def _build_bridge_group(self) -> QGroupBox:
         g = QGroupBox("TikTok Bridge (HTTP-сервер для расширения)")
         lay = QVBoxLayout(g)
+
+        hint = QLabel(
+            "Включает локальный HTTP-сервер, к которому подключается "
+            "userscript Tampermonkey для публикации в TikTok."
+        )
+        hint.setWordWrap(True)
+        hint.setObjectName("settings_hint")
+        lay.addWidget(hint)
+
+        row = QHBoxLayout()
+        self.chk_bridge_enabled = QCheckBox("Включить TikTok Bridge")
+        self.chk_bridge_enabled.setToolTip(
+            "Переключает сервер сразу (без перезапуска приложения)."
+        )
+        self.chk_bridge_enabled.toggled.connect(self._on_bridge_enabled_toggled)
+        row.addWidget(self.chk_bridge_enabled)
+        self.lbl_bridge_state = QLabel("выключен")
+        self.lbl_bridge_state.setObjectName("settings_status")
+        self.lbl_bridge_state.setProperty("state", "off")
+        row.addSpacing(12)
+        row.addWidget(self.lbl_bridge_state)
+        row.addStretch()
+        lay.addLayout(row)
 
         row = QHBoxLayout()
         self.chk_bridge_auto = QCheckBox("Запускать автоматически при старте")
@@ -620,10 +751,15 @@ class SettingsPage(BasePage):
         if theme not in self._theme_cards:
             theme = "dark"
         self._select_theme_card(theme)
-        self.chk_bridge_auto.setChecked(bool(db.get_setting("bridge_auto_start", False)))
+        self.chk_bridge_auto.setChecked(_as_bool(db.get_setting("bridge_auto_start", False)))
         self.ed_bridge_host.setText(str(db.get_setting("bridge_host", "127.0.0.1") or ""))
         self.sp_bridge_port.setValue(int(db.get_setting("bridge_port", 8765) or 8765))
         self.ed_bridge_token.setText(str(db.get_setting("bridge_token", "1224444") or ""))
+        # Текущее состояние переключателя Bridge — без побочного переключения сервера
+        bridge_on = _as_bool(db.get_setting("bridge_enabled", False))
+        self.chk_bridge_enabled.blockSignals(True)
+        self.chk_bridge_enabled.setChecked(bridge_on)
+        self.chk_bridge_enabled.blockSignals(False)
 
         # ── Куки YouTube ────────────────────────────────────────────
         mode = (db.get_setting("yt_cookies_mode", "auto") or "auto").strip().lower()
@@ -654,6 +790,7 @@ class SettingsPage(BasePage):
     def _save_all(self):
         db.set_setting("disk_limit_gb", int(self.sp_disk_limit.value()))
         db.set_setting("bridge_auto_start", bool(self.chk_bridge_auto.isChecked()))
+        db.set_setting("bridge_enabled", bool(self.chk_bridge_enabled.isChecked()))
         db.set_setting("bridge_host", self.ed_bridge_host.text().strip() or "127.0.0.1")
         db.set_setting("bridge_port", int(self.sp_bridge_port.value()))
         db.set_setting("bridge_token", self.ed_bridge_token.text().strip() or "1224444")
@@ -718,3 +855,42 @@ class SettingsPage(BasePage):
             )
         except Exception as e:
             QMessageBox.warning(self, "Ошибка", f"Не удалось сохранить:\n{e}")
+
+    # ── TikTok Bridge ──────────────────────────────────────────────────
+    def _on_bridge_enabled_toggled(self, checked: bool):
+        """Сохраняет настройку и просит MainWindow включить/выключить Bridge."""
+        db.set_setting("bridge_enabled", bool(checked))
+        # Промежуточное состояние — обновится по сигналам started_ok/stopped/error
+        self._set_bridge_state_label("starting" if checked else "stopping")
+        self.bridge_toggle_requested.emit(bool(checked))
+
+    def _set_bridge_state_label(self, state: str, text: Optional[str] = None):
+        """Обновляет лейбл состояния Bridge (ok/err/info/off)."""
+        if not hasattr(self, "lbl_bridge_state"):
+            return
+        defaults = {
+            "ok":       "работает",
+            "err":      "ошибка",
+            "off":      "выключен",
+            "starting": "запуск…",
+            "stopping": "остановка…",
+        }
+        qss_state = {
+            "ok": "ok", "err": "err", "off": "off",
+            "starting": "info", "stopping": "info",
+        }.get(state, "info")
+        self.lbl_bridge_state.setProperty("state", qss_state)
+        self.lbl_bridge_state.setText(text or defaults.get(state, state))
+        self.lbl_bridge_state.style().unpolish(self.lbl_bridge_state)
+        self.lbl_bridge_state.style().polish(self.lbl_bridge_state)
+
+    def set_bridge_state(self, state: str, text: Optional[str] = None):
+        """Публичный слот для MainWindow — прокидывает состояние Bridge в UI."""
+        self._set_bridge_state_label(state, text)
+        # Если Bridge упал — возвращаем переключатель в OFF без излишних сигналов
+        if state in ("off", "err") and hasattr(self, "chk_bridge_enabled"):
+            if self.chk_bridge_enabled.isChecked():
+                self.chk_bridge_enabled.blockSignals(True)
+                self.chk_bridge_enabled.setChecked(False)
+                self.chk_bridge_enabled.blockSignals(False)
+                db.set_setting("bridge_enabled", False)

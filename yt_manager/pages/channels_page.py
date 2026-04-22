@@ -252,13 +252,36 @@ QPushButton#lib_btn:hover { background:#4f98a3; color:#0a1e20; border-color:#4f9
 """
 
 
+def _apply_page_style_for_theme(widget):
+    """Применяет PAGE_STYLE только для тёмной темы.
+
+    Для других тем PAGE_STYLE с жёстко заданными цветами бы их перекрывал.
+    Снимая stylesheet, мы пропускаем глобальный QSS приложения.
+    """
+    try:
+        from db import db as _db
+        theme = (_db.get_setting("theme", "dark") or "dark").strip().lower()
+    except Exception:
+        theme = "dark"
+    if theme == "dark":
+        widget.setStyleSheet(PAGE_STYLE)
+    else:
+        widget.setStyleSheet("")
+
+
 # ─────────────────────────────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────
 
-def fmt_views(n: int) -> str:
-    """Форматирует просмотры: 1 234 567 → 1.2M."""
-    if not n:
+def fmt_views(n) -> str:
+    """Форматирует просмотры: 1 234 567 → 1.2M. 0 должен отображаться как «0»."""
+    if n is None:
+        return "—"
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return "—"
+    if n < 0:
         return "—"
     if n >= 1_000_000:
         return f"{n / 1_000_000:.1f}M"
@@ -411,7 +434,7 @@ class AddChannelDialog(QDialog):
         self.setModal(True)
         self._worker: Optional[FetchChannelWorker] = None
         self._build_ui()
-        self.setStyleSheet(PAGE_STYLE)
+        _apply_page_style_for_theme(self)
 
     def _build_ui(self):
         lay = QVBoxLayout(self)
@@ -627,7 +650,7 @@ class ChannelsPage(QWidget):
         queue_manager.download_failed.connect(self._on_dl_error)
 
         self._build_ui()
-        self.setStyleSheet(PAGE_STYLE)
+        _apply_page_style_for_theme(self)
         self._load_channels()
 
     # ─────────────────────────────────────────────────
