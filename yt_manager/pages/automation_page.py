@@ -514,8 +514,9 @@ class AutoPipelineWorker(QThread):
             self.log.emit(f"Ошибка скачивания: {e}")
             return None
         if not path:
-            db.update_video_status(v["id"], "error", error_msg="download returned None")
-            self.log.emit("Скачивание завершилось без результата.")
+            err_msg = getattr(yt_service, "last_error_message", "") or "download returned None"
+            db.update_video_status(v["id"], "error", error_msg=err_msg)
+            self.log.emit(f"Скачивание завершилось без результата. {err_msg}")
             return None
         db.update_video_status(v["id"], "downloaded", file_path=path)
         self.step_finished.emit(f"Скачано: {path}")
@@ -1125,7 +1126,20 @@ class AutomationPage(BasePage):
     def _log(self, msg: str):
         ts = datetime.now().strftime("%H:%M:%S")
         try:
-            self.journal.appendPlainText(f"[{ts}] {msg}")
+            # Сообщения с префиксом [!] подсвечиваем красным
+            if "[!]" in msg:
+                from PyQt6.QtGui import QTextCharFormat, QColor
+                cursor = self.journal.textCursor()
+                cursor.movePosition(cursor.MoveOperation.End)
+                fmt = QTextCharFormat()
+                fmt.setForeground(QColor("#d64545"))
+                fmt.setFontWeight(700)
+                if self.journal.toPlainText():
+                    cursor.insertText("\n")
+                cursor.insertText(f"[{ts}] {msg}", fmt)
+                self.journal.setTextCursor(cursor)
+            else:
+                self.journal.appendPlainText(f"[{ts}] {msg}")
         except Exception:
             pass
         log.info("auto: %s", msg)
