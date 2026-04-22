@@ -16,10 +16,11 @@ from enum import Enum
 
 from PyQt6.QtWidgets import (
     QWidget, QFrame, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QTreeWidget, QTreeWidgetItem,
+    QLabel, QLineEdit, QPushButton, QTreeWidget, QTreeWidgetItem,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QSplitter, QMenu, QAbstractItemView, QSizePolicy,
     QProgressBar, QScrollArea, QApplication, QMessageBox,
+    QTabWidget,
 )
 from PyQt6.QtCore import (
     Qt, QThread, pyqtSignal, QTimer,
@@ -840,6 +841,16 @@ class FileTableWidget(QFrame):
         self._table.hide()
         lay.addWidget(self._table, stretch=1)
 
+    def filter_rows(self, query: str):
+        """Скрывает строки, которые не матчат подстроку по имени файла."""
+        q = (query or "").strip().lower()
+        for r in range(self._table.rowCount()):
+            it = self._table.item(r, self.COL_NAME)
+            if not it:
+                continue
+            name = (it.text() or "").lower()
+            self._table.setRowHidden(r, bool(q) and q not in name)
+
     # ── Загрузка папки ─────────────────────────────────────────────────
 
     def load_folder(self, path: str):
@@ -1063,12 +1074,66 @@ class FileTableWidget(QFrame):
 
 
 
+class FolderTabPage(QWidget):
+    """Одна вкладка страницы «Папки»: поиск + таблица + превью."""
+
+    def __init__(self, title: str, folder_path: str, parent=None):
+        super().__init__(parent)
+        self._folder = folder_path
+        self._title = title
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(6, 6, 6, 6)
+        lay.setSpacing(6)
+
+        head = QHBoxLayout()
+        self._path_lbl = QLabel(folder_path)
+        self._path_lbl.setStyleSheet("color:#5a5957; font-size:11px;")
+        head.addWidget(self._path_lbl, 1)
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Поиск по имени файла…")
+        self._search.setClearButtonEnabled(True)
+        self._search.setFixedWidth(240)
+        head.addWidget(self._search)
+        refresh = QPushButton("🔄")
+        refresh.setFixedWidth(36)
+        refresh.clicked.connect(self.refresh)
+        head.addWidget(refresh)
+        lay.addLayout(head)
+
+        split = QSplitter(Qt.Orientation.Horizontal)
+        split.setChildrenCollapsible(False)
+        self.table = FileTableWidget()
+        split.addWidget(self.table)
+        self.preview = VideoPreviewPanel()
+        split.addWidget(self.preview)
+        split.setSizes([720, 280])
+        lay.addWidget(split, 1)
+
+        self.table.file_selected.connect(self.preview.show_file)
+        self._search.textChanged.connect(self.table.filter_rows)
+
+    def refresh(self):
+        if os.path.isdir(self._folder):
+            self.table.load_folder(self._folder)
+        else:
+            # Папка может не существовать — перекроем «пустым» состоянием.
+            try:
+                os.makedirs(self._folder, exist_ok=True)
+            except Exception:
+                pass
+            self.table.load_folder(self._folder)
+        q = self._search.text()
+        if q:
+            self.table.filter_rows(q)
+
+
 class FoldersPage(BasePage):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._config_paths = load_config_paths()
         self._size_worker: FolderSizeWorker = None
         self._watcher = QFileSystemWatcher(self)
+        self._tab_pages: dict[str, FolderTabPage] = {}
         self._build_ui()
         self.setStyleSheet(PAGE_STYLE)
         QTimer.singleShot(200, self._initial_load)
@@ -1101,53 +1166,59 @@ class FoldersPage(BasePage):
 
         return bar
 
-    def _build_body(self) -> QSplitter:
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setHandleWidth(1)
-        splitter.setChildrenCollapsible(False)
-
-        # ── Левая панель: дерево + диск ──
-        left = QFrame()
-        left.setObjectName('left_panel')
-        left.setMinimumWidth(260)
-        left.setMaximumWidth(340)
-        left_lay = QVBoxLayout(left)
-        left_lay.setContentsMargins(10, 10, 10, 10)
-        left_lay.setSpacing(8)
-
-        tree_lbl = QLabel('СТРУКТУРА ПРОЕКТА')
-        tree_lbl.setObjectName('tree_section')
-        left_lay.addWidget(tree_lbl)
-
-        self._tree = FolderTreeWidget()
-        self._tree.folder_selected.connect(self._on_folder_selected)
-        left_lay.addWidget(self._tree, stretch=1)
-
-        # Использование диска
-        disk_lbl = QLabel('ДИСК')
-        disk_lbl.setObjectName('tree_section')
-        left_lay.addWidget(disk_lbl)
-
+    def _build_body(self) -> QWidget:
+        """6 вкладок — по одной на каждую папку проекта.
+        Каждая вкладка: поиск + сортируемая таблица + превью."""
         base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        dl_raw = self._config_paths.get('downloads', './downloads')
-        dl_abs = os.path.join(base, dl_raw) if not os.path.isabs(dl_raw) else dl_raw
+        try:
+            from utils import (
+                DIR_DOWNLOADS, DIR_PROCESSED, DIR_CLIPS,
+                DIR_BACKGROUNDS, DIR_BANNERS, DIR_RETENTION,
+            )
+        except Exception:
+            # Фоллбэк, если утилиты ещё не обновлены
+            DIR_DOWNLOADS = "загрузки"
+            DIR_PROCESSED = "обработанное"
+            DIR_CLIPS = "нарезки"
+            DIR_BACKGROUNDS = "фон"
+            DIR_BANNERS = "баннер"
+            DIR_RETENTION = "удержание"
+
+        specs = [
+            ("Загрузки",      DIR_DOWNLOADS),
+            ("Обработанное",  DIR_PROCESSED),
+            ("Нарезки",       DIR_CLIPS),
+            ("Фоны",          DIR_BACKGROUNDS),
+            ("Баннеры",       DIR_BANNERS),
+            ("Удержание",     DIR_RETENTION),
+        ]
+
+        self._tabs = QTabWidget()
+        self._tabs.setDocumentMode(True)
+        for title, dir_const in specs:
+            abs_path = os.path.join(base, dir_const)
+            page = FolderTabPage(title, abs_path, self)
+            self._tabs.addTab(page, title)
+            self._tab_pages[dir_const] = page
+        self._tabs.currentChanged.connect(self._on_tab_changed)
+
+        # Левая панель с использованием диска убрана — теперь её место
+        # занимает статус-бар снизу. Но оставим DiskUsageWidget под
+        # таблицей загрузок для наглядности.
+        wrapper = QWidget()
+        wlay = QVBoxLayout(wrapper)
+        wlay.setContentsMargins(0, 0, 0, 0)
+        wlay.addWidget(self._tabs, 1)
+
+        dl_abs = os.path.join(base, DIR_DOWNLOADS)
         self._disk_widget = DiskUsageWidget(dl_abs)
-        left_lay.addWidget(self._disk_widget)
+        wlay.addWidget(self._disk_widget)
+        return wrapper
 
-        splitter.addWidget(left)
-
-        # ── Средняя панель: таблица файлов ──
-        self._file_table = FileTableWidget()
-        self._file_table.setMinimumWidth(380)
-        self._file_table.file_selected.connect(self._on_file_selected)
-        splitter.addWidget(self._file_table)
-
-        # ── Правая панель: предпросмотр ──
-        self._preview = VideoPreviewPanel()
-        splitter.addWidget(self._preview)
-
-        splitter.setSizes([280, 620, 260])
-        return splitter
+    def _on_tab_changed(self, idx: int):
+        page = self._tabs.widget(idx)
+        if isinstance(page, FolderTabPage):
+            page.refresh()
 
     def _build_status_bar(self) -> QFrame:
         bar = QFrame()
@@ -1175,60 +1246,51 @@ class FoldersPage(BasePage):
     # ── Загрузка и обновление ─────────────────────────────────────────
 
     def _initial_load(self):
-        self._tree.load(self._config_paths)
-        self._start_size_worker()
+        self._full_refresh()
         self._setup_watcher()
 
     def _full_refresh(self):
         self._config_paths = load_config_paths()
-        self._tree.load(self._config_paths)
-        self._start_size_worker()
+        for p in self._tab_pages.values():
+            p.refresh()
         self._disk_widget.refresh()
-        if self._file_table._current_path:
-            self._file_table.load_folder(self._file_table._current_path)
+        self._start_size_worker()
+        self._update_status()
 
     def _start_size_worker(self):
         if self._size_worker and self._size_worker.isRunning():
             return
-        base  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         paths = []
-        for raw in self._config_paths.values():
-            abs_p = os.path.join(base, raw) if not os.path.isabs(raw) else raw
+        for dir_const in self._tab_pages.keys():
+            abs_p = os.path.join(base, dir_const)
             if os.path.isdir(abs_p):
                 paths.append(abs_p)
         if not paths:
             return
         self._size_worker = FolderSizeWorker(paths)
-        self._size_worker.size_calculated.connect(self._tree.update_size)
         self._size_worker.start()
 
     def _setup_watcher(self):
         base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        for raw in self._config_paths.values():
-            abs_p = os.path.join(base, raw) if not os.path.isabs(raw) else raw
+        for dir_const in self._tab_pages.keys():
+            abs_p = os.path.join(base, dir_const)
             if os.path.isdir(abs_p) and abs_p not in self._watcher.directories():
                 self._watcher.addPath(abs_p)
         self._watcher.directoryChanged.connect(self._on_dir_changed)
 
-    def _on_file_selected(self, path: str):
-        self._preview.show_file(path)
-
-    def _on_folder_selected(self, path: str):
-        self._file_table.load_folder(path)
-        self._update_status()
-        p = path
-        self._status_path.setText(
-            p if len(p) <= 60 else '...' + p[-57:]
-        )
-
     def _on_dir_changed(self, path: str):
-        if path == self._file_table._current_path:
-            self._file_table.load_folder(path)
-            self._update_status()
+        for page in self._tab_pages.values():
+            if getattr(page.table, '_current_path', '') == path:
+                page.table.load_folder(path)
 
     def _update_status(self):
-        n    = self._file_table.file_count()
-        size = self._file_table.total_size()
-        noun = 'файл' if n == 1 else ('файла' if 2 <= n <= 4 else 'файлов')
-        self._status_files.setText(f'{n} {noun}')
-        self._status_size.setText(human_size(size) if size > 0 else '')
+        total_files = 0
+        total_size = 0
+        for page in self._tab_pages.values():
+            total_files += page.table.file_count()
+            total_size += page.table.total_size()
+        noun = 'файл' if total_files == 1 else (
+            'файла' if 2 <= total_files <= 4 else 'файлов')
+        self._status_files.setText(f'{total_files} {noun}')
+        self._status_size.setText(human_size(total_size) if total_size > 0 else '')
