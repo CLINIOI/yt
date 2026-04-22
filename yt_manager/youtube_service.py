@@ -490,6 +490,26 @@ class YouTubeService:
                 progress_callback(DownloadProgress(status="error"))
             return None
 
+    # ── Скачивание одного видео (синхронно, без QThread) ──────────────
+
+    def download_single_video(
+        self,
+        yt_id_or_url: str,
+        output_dir: str,
+        quality: str = "1080p",
+    ) -> Optional[str]:
+        """Синхронное скачивание одного видео — обёртка над download_video.
+
+        Используется AutoPipelineWorker для строго последовательного
+        пайплайна (одно видео за один тик авто-таймера). Возвращает
+        путь к файлу или None при ошибке.
+        """
+        return self.download_video(
+            yt_id_or_url=yt_id_or_url,
+            output_dir=output_dir,
+            quality=quality,
+        )
+
     # ── Утилиты ───────────────────────────────────────────────────────
 
     @staticmethod
