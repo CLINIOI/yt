@@ -306,7 +306,7 @@ class ClipPrepWorker(QThread):
 
                 for clip_path in result.clips:
                     try:
-                        db.add_clip(
+                        cid = db.add_clip(
                             tiktok_id=tt_id,
                             file_path=clip_path,
                             source_video_id=v["id"],
@@ -314,6 +314,13 @@ class ClipPrepWorker(QThread):
                             status="ready",
                         )
                         total_clips += 1
+                        # Автогенерация скрипта публикации для нового клипа
+                        try:
+                            db.auto_generate_script_for_clip(cid)
+                        except Exception as e:
+                            self.progress.emit(
+                                f"Автоскрипт: не удалось сгенерировать ({e})"
+                            )
                     except Exception as e:
                         self.progress.emit(f"БД: не удалось добавить клип: {e}")
                 self.progress.emit(

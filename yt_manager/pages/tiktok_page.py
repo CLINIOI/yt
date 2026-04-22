@@ -29,7 +29,6 @@ from pages.base_page import BasePage
 from db import db
 from utils import normalize_hashtags
 from tiktok.hashtag_generator import generate_hashtags
-from tiktok.script_builder import build_string
 
 
 log = logging.getLogger(__name__)
@@ -202,13 +201,11 @@ class TikTokPage(BasePage):
         self.tab_stats = self._build_stats_tab()
         self.tab_tags = self._build_tags_tab()
         self.tab_schedule = self._build_schedule_tab()
-        self.tab_scripts = self._build_scripts_tab()
         self.tab_published = self._build_published_tab()
 
         self.tabs.addTab(self.tab_stats, "Статистика")
         self.tabs.addTab(self.tab_tags, "Хэштеги")
         self.tabs.addTab(self.tab_schedule, "График")
-        self.tabs.addTab(self.tab_scripts, "Скрипты")
         self.tabs.addTab(self.tab_published, "Опубликовано")
 
         self.tabs.setEnabled(False)
@@ -340,27 +337,6 @@ class TikTokPage(BasePage):
         lay.addWidget(scroll, 1)
         return w
 
-    def _build_scripts_tab(self) -> QWidget:
-        w = QWidget()
-        lay = QVBoxLayout(w)
-        lay.setContentsMargins(12, 12, 12, 12)
-        lay.setSpacing(8)
-
-        self.tbl_scripts = QTableWidget(0, 4)
-        self.tbl_scripts.setHorizontalHeaderLabels(["Заголовок", "Теги", "Статус", "Создано"])
-        self.tbl_scripts.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.tbl_scripts.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.tbl_scripts.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        lay.addWidget(self.tbl_scripts, 1)
-
-        row = QHBoxLayout()
-        btn_gen = QPushButton("Сгенерировать до 10 скриптов")
-        btn_gen.clicked.connect(self._on_generate_scripts)
-        row.addWidget(btn_gen)
-        row.addStretch()
-        lay.addLayout(row)
-        return w
-
     def _build_published_tab(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
@@ -436,19 +412,6 @@ class TikTokPage(BasePage):
             lst.clear()
             for t in sorted({x for x in sched.get(key, []) if _TIME_SLOT_RE.match(x)}):
                 lst.addItem(t)
-
-        # Скрипты (черновики + отмеченные)
-        scripts = db.list_publish_scripts(self._current_id)
-        self.tbl_scripts.setRowCount(0)
-        for s in scripts:
-            if s.get("status") == "done":
-                continue
-            r = self.tbl_scripts.rowCount()
-            self.tbl_scripts.insertRow(r)
-            self.tbl_scripts.setItem(r, 0, QTableWidgetItem(s.get("title") or "—"))
-            self.tbl_scripts.setItem(r, 1, QTableWidgetItem(s.get("hashtags") or ""))
-            self.tbl_scripts.setItem(r, 2, QTableWidgetItem(s.get("status") or "draft"))
-            self.tbl_scripts.setItem(r, 3, QTableWidgetItem(s.get("created_at") or ""))
 
         # Опубликованное
         self.tbl_published.setRowCount(0)
@@ -618,89 +581,6 @@ class TikTokPage(BasePage):
         if db.set_tiktok_schedule(self._current_id, sched):
             total = sum(len(sched[k]) for k in WEEKDAYS)
             self._show_saved(self.lbl_schedule_saved, f"Сохранено ({total} слотов)")
-
-    # Scripts -------------------------------------------------------
-    def _on_generate_scripts(self):
-        if not self._current_id:
-            return
-        ch = db.get_tiktok_channel(self._current_id)
-        if not ch:
-            return
-        ready = db.list_clips(self._current_id, "ready")
-        if not ready:
-            QMessageBox.information(
-                self, "Нет клипов",
-                "Нет готовых клипов. Запустите подготовку в «Автоматизации»."
-            )
-            return
-
-        existing = db.list_publish_scripts(self._current_id)
-        used_clip_ids = {s.get("clip_id") for s in existing if s.get("status") != "done"}
-        available = [c for c in ready if c["id"] not in used_clip_ids]
-        if not available:
-            QMessageBox.information(
-                self, "Всё готово",
-                "У всех готовых клипов уже есть черновики скриптов."
-            )
-            return
-
-        base_tags = ch.get("hashtags", [])
-        schedule = ch.get("schedule") or []  # ["HH:MM", ...]
-        caption_tpl = (db.get_setting("publish_caption_template")
-                       or "{title}\n\n{hashtags}")
-
-        # Занятые слоты: уже назначенные scheduled_at у активных скриптов
-        busy_slots = set()
-        for s in existing:
-            if s.get("status") == "done":
-                continue
-            if s.get("scheduled_at"):
-                busy_slots.add(s["scheduled_at"])
-
-        n = min(10, len(available))
-        ch_name = ch.get("display_name") or f"@{ch.get('handle','')}"
-
-        for c in available[:n]:
-            # Заголовок — из связанного видео, а не имя файла
-            src_vid = c.get("source_video_id")
-            video = db.get_video(src_vid) if src_vid else None
-            title = (video.get("title") if video else None) \
-                    or os.path.splitext(
-                        os.path.basename(c.get("file_path") or "")
-                    )[0] \
-                    or "Клип"
-
-            tags = generate_hashtags(title, base_tags, limit=5)
-            tags_str = " ".join(tags)
-
-            scheduled_at = _next_free_slot(schedule, busy_slots)
-            if scheduled_at:
-                busy_slots.add(scheduled_at)
-
-            # Caption по шаблону. Поддерживаемые плейсхолдеры:
-            # {title}, {hashtags}, {channel}, {date}
-            try:
-                caption_text = caption_tpl.format(
-                    title=title,
-                    hashtags=tags_str,
-                    channel=ch_name,
-                    date=(scheduled_at or datetime.now().strftime("%Y-%m-%d %H:%M")),
-                )
-            except Exception:
-                caption_text = f"{title}\n\n{tags_str}"
-
-            db.add_publish_script(
-                tiktok_id=self._current_id,
-                clip_id=c["id"],
-                title=title,
-                file_path=c.get("file_path"),
-                hashtags=tags_str,
-                caption=caption_text,
-                scheduled_at=scheduled_at,
-                status="draft",
-            )
-        self._refresh_current()
-        QMessageBox.information(self, "Готово", f"Создано {n} черновиков.")
 
     # Navigation ---------------------------------------------------
     def _go_automation(self):

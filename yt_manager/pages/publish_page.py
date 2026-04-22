@@ -106,6 +106,9 @@ class PublishPage(BasePage):
         # Панель инструментов над таблицей
         tools = QHBoxLayout()
         tools.setContentsMargins(0, 0, 0, 0)
+        info = QLabel("Автогенерация включена — новые клипы сразу попадают сюда.")
+        info.setStyleSheet("color:#6ec06e; font-weight:600;")
+        tools.addWidget(info)
         tools.addStretch()
         btn_recount = QPushButton("Пересчитать статусы")
         btn_recount.setToolTip(

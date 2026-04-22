@@ -6,7 +6,8 @@ import sqlite3
 import threading
 import os
 import json
-from datetime import datetime
+import re
+from datetime import datetime, time, timedelta
 
 
 # Определяем путь к БД строго относительно этого файла
@@ -1249,6 +1250,108 @@ class Database:
     def delete_publish_script(self, script_id: int):
         self.conn.execute("DELETE FROM publish_scripts WHERE id = ?", (int(script_id),))
         self._commit()
+
+    _TIME_SLOT_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
+
+    @classmethod
+    def _next_free_slot_weekday(cls, schedule: dict, busy: set) -> str | None:
+        """Ближайший свободный слот в формате 'YYYY-MM-DD HH:MM' по
+        расписанию-словарю {"mon":[...],...}."""
+        if not isinstance(schedule, dict):
+            return None
+        if not any(schedule.get(k) for k in cls._WEEKDAYS):
+            return None
+        now = datetime.now()
+        for day_offset in range(0, 30):
+            d = now.date() + timedelta(days=day_offset)
+            day_key = cls._WEEKDAYS[d.weekday()]
+            times = sorted({t for t in schedule.get(day_key, [])
+                            if cls._TIME_SLOT_RE.match(t)})
+            for hhmm in times:
+                h, m = hhmm.split(":")
+                dt_cand = datetime.combine(d, time(int(h), int(m)))
+                if dt_cand <= now:
+                    continue
+                candidate = f"{d.isoformat()} {hhmm}"
+                if candidate in busy:
+                    continue
+                return candidate
+        return None
+
+    def auto_generate_script_for_clip(self, clip_id: int) -> int | None:
+        """Автоматически создаёт publish_script для клипа: подбирает
+        следующий свободный слот из расписания канала, формирует
+        заголовок/теги/caption. Возвращает id скрипта либо None."""
+        try:
+            from utils import normalize_hashtags
+            from tiktok.hashtag_generator import generate_hashtags
+        except Exception:
+            normalize_hashtags = lambda x: list(x or [])
+            def generate_hashtags(title, base, limit=5):
+                return list(base or [])[:limit]
+
+        clip = self.get_clip(int(clip_id))
+        if not clip:
+            return None
+        tt_id = clip.get("tiktok_id")
+        if not tt_id:
+            return None
+        ch = self.get_tiktok_channel(tt_id)
+        if not ch:
+            return None
+        # Пропускаем, если по этому клипу уже есть активный скрипт
+        existing = self.list_publish_scripts(tt_id)
+        if any(s.get("clip_id") == int(clip_id) and s.get("status") != "done"
+               for s in existing):
+            return None
+
+        base_tags = normalize_hashtags(ch.get("hashtags", []))
+        schedule = ch.get("schedule") or {}
+        caption_tpl = (self.get_setting("publish_caption_template")
+                       or "{title}\n\n{hashtags}")
+
+        busy_slots = set()
+        for s in existing:
+            if s.get("status") == "done":
+                continue
+            if s.get("scheduled_at"):
+                busy_slots.add(s["scheduled_at"])
+
+        # Заголовок из исходного видео
+        src_vid = clip.get("source_video_id")
+        video = self.get_video(src_vid) if src_vid else None
+        title = (video.get("title") if video else None) \
+                or os.path.splitext(
+                    os.path.basename(clip.get("file_path") or "")
+                )[0] \
+                or "Клип"
+
+        tags = generate_hashtags(title, base_tags, limit=5)
+        tags_str = " ".join(tags)
+
+        scheduled_at = self._next_free_slot_weekday(schedule, busy_slots)
+
+        ch_name = ch.get("display_name") or f"@{ch.get('handle','')}"
+        try:
+            caption_text = caption_tpl.format(
+                title=title,
+                hashtags=tags_str,
+                channel=ch_name,
+                date=(scheduled_at or datetime.now().strftime("%Y-%m-%d %H:%M")),
+            )
+        except Exception:
+            caption_text = f"{title}\n\n{tags_str}"
+
+        return self.add_publish_script(
+            tiktok_id=tt_id,
+            clip_id=int(clip_id),
+            title=title,
+            file_path=clip.get("file_path"),
+            hashtags=tags_str,
+            caption=caption_text,
+            scheduled_at=scheduled_at,
+            status="draft",
+        )
 
     # ─────────────────────────────────────────────────────────────────
     # НАСТРОЙКИ АВТОМАТИЗАЦИИ
