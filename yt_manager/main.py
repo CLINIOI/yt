@@ -175,6 +175,30 @@ def main():
     # Пересоздаём папки после миграции (на случай, если что-то переименовалось).
     ensure_dirs(config)
 
+    # 6.1. Миграция старых ручных загрузок: downloads/ → загрузки/_без_tiktok/,
+    # processed/ → обработанное/_без_tiktok/. Выполняется строго после
+    # migrate_dirs_v1, чтобы не конкурировать за каталог «загрузки».
+    try:
+        import logging
+        from utils import migrate_legacy_downloads_v1
+        _log = logging.getLogger("legacy_downloads_migration")
+        ls = migrate_legacy_downloads_v1(BASE_DIR, log=_log)
+        if ls.get("moved") or ls.get("sources"):
+            _log.info(
+                "Миграция downloads/processed: перенесено=%d, пропущено=%d, "
+                "videos.file_path=%d, источники=%s, ошибок=%d",
+                ls.get("moved", 0), ls.get("skipped", 0),
+                ls.get("db_videos", 0), ls.get("sources"),
+                ls.get("errors", 0),
+            )
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception(
+            "migrate_legacy_downloads_v1 упала — продолжаем запуск"
+        )
+
+    ensure_dirs(config)
+
     # 7. Одноразовая миграция имён файлов (удаление [XXXX])
     try:
         import logging

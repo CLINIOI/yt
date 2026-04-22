@@ -510,3 +510,120 @@ def migrate_dirs_v1(base_path: str, log=None) -> dict:
         except Exception:
             pass
     return stats
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Миграция старых ручных загрузок: downloads/ → загрузки/_без_tiktok/
+#                                    processed/ → обработанное/_без_tiktok/
+# ──────────────────────────────────────────────────────────────────────
+
+_LEGACY_DOWNLOADS_FLAG = "legacy_downloads_migrated_v1"
+
+
+def migrate_legacy_downloads_v1(base_path: str, log=None) -> dict:
+    """Одноразовая миграция старых папок ручного скачивания.
+
+    Если в корне проекта есть унаследованные ``downloads/`` или
+    ``processed/`` (лежат параллельно новой структуре), их содержимое
+    переносится под ``<цель>/_без_tiktok/`` — туда же, куда теперь
+    резолвится путь для каналов без TikTok-привязки. Так вручную
+    скачанные видео продолжают быть видны в UI «Папки».
+
+    Идемпотентна через флаг ``legacy_downloads_migrated_v1`` в
+    ``app_settings``. При мерже конфликтующий файл в назначении не
+    перезаписывается — исходный остаётся на месте и попадёт в лог.
+    """
+    stats = {"moved": 0, "skipped": 0, "db_videos": 0, "errors": 0,
+             "sources": []}
+    try:
+        from db import db as _db
+    except Exception:
+        _db = None
+
+    if _db is not None:
+        try:
+            if _db.get_setting(_LEGACY_DOWNLOADS_FLAG):
+                if log:
+                    log.info("migrate_legacy_downloads_v1: уже выполнена")
+                return stats
+        except Exception:
+            pass
+
+    pairs = [
+        ("downloads", DIR_DOWNLOADS),
+        ("processed", DIR_PROCESSED),
+    ]
+
+    path_prefix_map: list[tuple[str, str]] = []
+    for old_name, new_name in pairs:
+        old_abs = os.path.join(base_path, old_name)
+        if not os.path.isdir(old_abs):
+            continue
+        # Если папка пустая — просто удалим её, чтобы не мозолила глаза.
+        try:
+            if not os.listdir(old_abs):
+                try:
+                    os.rmdir(old_abs)
+                except OSError:
+                    pass
+                continue
+        except OSError:
+            pass
+
+        dst = os.path.join(base_path, new_name, TIKTOK_UNLINKED_HANDLE)
+        try:
+            os.makedirs(dst, exist_ok=True)
+        except OSError as e:
+            if log:
+                log.warning("cannot create %s: %s", dst, e)
+            stats["errors"] += 1
+            continue
+
+        moved, skipped = _merge_tree(old_abs, dst, log=log)
+        stats["moved"] += moved
+        stats["skipped"] += skipped
+        stats["sources"].append(old_name)
+        if log:
+            log.info("migrate_legacy_downloads_v1: %s → %s: moved=%d, "
+                     "skipped=%d", old_name, os.path.join(
+                         new_name, TIKTOK_UNLINKED_HANDLE), moved, skipped)
+
+        # Удаляем пустую исходную папку
+        try:
+            if os.path.isdir(old_abs) and not os.listdir(old_abs):
+                os.rmdir(old_abs)
+        except OSError:
+            pass
+
+        # Для обновления БД собираем префиксы (со и без завершающего sep).
+        path_prefix_map.append((old_abs, dst))
+        path_prefix_map.append((old_abs + os.sep, dst + os.sep))
+
+    # Обновляем пути в таблице videos (clips в старой downloads/ не лежали).
+    if _db is not None and path_prefix_map:
+        try:
+            cur = _db.conn.cursor()
+            for old_p, new_p in path_prefix_map:
+                try:
+                    cur.execute(
+                        "UPDATE videos SET file_path = REPLACE(file_path, ?, ?) "
+                        "WHERE file_path LIKE ?",
+                        (old_p, new_p, old_p + "%"),
+                    )
+                    stats["db_videos"] += cur.rowcount
+                except Exception as e:
+                    if log:
+                        log.warning("db update videos: %s", e)
+                    stats["errors"] += 1
+            _db.conn.commit()
+        except Exception as e:
+            if log:
+                log.warning("migrate_legacy_downloads_v1 db commit: %s", e)
+            stats["errors"] += 1
+
+    if _db is not None:
+        try:
+            _db.set_setting(_LEGACY_DOWNLOADS_FLAG, "1")
+        except Exception:
+            pass
+    return stats
