@@ -16,11 +16,11 @@ import os
 import re
 from datetime import datetime
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFormLayout, QFrame, QHBoxLayout, QHeaderView,
-    QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMessageBox, QPushButton, QSpinBox, QSplitter, QTableWidget,
+    QDialog, QDialogButtonBox, QFormLayout, QFrame, QGroupBox, QHBoxLayout,
+    QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QMessageBox, QPushButton, QScrollArea, QSpinBox, QSplitter, QTableWidget,
     QTableWidgetItem, QTabWidget, QTimeEdit, QVBoxLayout, QWidget,
 )
 from PyQt6.QtCore import QTime
@@ -120,6 +120,13 @@ class TikTokPage(BasePage):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._current_id: int | None = None
+        self._suppress_autosave = False
+        self._tags_save_timer = QTimer(self)
+        self._tags_save_timer.setSingleShot(True)
+        self._tags_save_timer.timeout.connect(self._autosave_tags)
+        self._schedule_save_timer = QTimer(self)
+        self._schedule_save_timer.setSingleShot(True)
+        self._schedule_save_timer.timeout.connect(self._autosave_schedule)
         self._build_ui()
         self._reload_channels()
 
@@ -222,10 +229,12 @@ class TikTokPage(BasePage):
         lay.setContentsMargins(12, 12, 12, 12)
         lay.setSpacing(8)
 
-        lay.addWidget(QLabel("Хэштеги канала (каждый тег на отдельной строке):"))
+        lay.addWidget(QLabel("Хэштеги канала (каждый тег на отдельной строке). "
+                             "Изменения сохраняются автоматически."))
         self.list_tags = QListWidget()
         self.list_tags.setEditTriggers(QListWidget.EditTrigger.DoubleClicked |
                                        QListWidget.EditTrigger.EditKeyPressed)
+        self.list_tags.itemChanged.connect(self._on_tags_changed)
         lay.addWidget(self.list_tags, 1)
 
         row = QHBoxLayout()
@@ -235,11 +244,12 @@ class TikTokPage(BasePage):
         btn_del_tag.clicked.connect(self._on_delete_tag)
         btn_gen = QPushButton("Сгенерировать")
         btn_gen.clicked.connect(self._on_generate_tags)
-        btn_save = QPushButton("Сохранить")
-        btn_save.clicked.connect(self._save_tags)
-        for b in (btn_add_tag, btn_del_tag, btn_gen, btn_save):
+        for b in (btn_add_tag, btn_del_tag, btn_gen):
             row.addWidget(b)
         row.addStretch()
+        self.lbl_tags_saved = QLabel("")
+        self.lbl_tags_saved.setStyleSheet("color:#6ec06e; font-weight:600;")
+        row.addWidget(self.lbl_tags_saved)
         lay.addLayout(row)
         return w
 
@@ -352,11 +362,13 @@ class TikTokPage(BasePage):
         self.lbl_stat_published.setText(f"Опубликовано: {len(scripts_done)}")
 
         # Теги
+        self._suppress_autosave = True
         self.list_tags.clear()
         for t in ch.get("hashtags", []):
             item = QListWidgetItem(t)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
             self.list_tags.addItem(item)
+        self._suppress_autosave = False
 
         # Расписание
         self.list_schedule.clear()
@@ -423,6 +435,11 @@ class TikTokPage(BasePage):
         self.lbl_title.setText("Выберите TikTok-канал слева или добавьте новый.")
 
     # Tags ----------------------------------------------------------
+    def _on_tags_changed(self, *_a):
+        if self._suppress_autosave or not self._current_id:
+            return
+        self._tags_save_timer.start(1000)
+
     def _on_add_tag(self):
         text, ok = QInputDialog.getText(self, "Новый тег", "Тег:")
         if not ok or not text.strip():
@@ -430,11 +447,13 @@ class TikTokPage(BasePage):
         item = QListWidgetItem(text.strip())
         item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
         self.list_tags.addItem(item)
+        self._tags_save_timer.start(1000)
 
     def _on_delete_tag(self):
         row = self.list_tags.currentRow()
         if row >= 0:
             self.list_tags.takeItem(row)
+            self._tags_save_timer.start(300)
 
     def _on_generate_tags(self):
         if not self._current_id:
@@ -458,20 +477,24 @@ class TikTokPage(BasePage):
         for t in sample_titles:
             generated.extend(generate_hashtags(t, current_tags, limit=5))
         combined = normalize_hashtags(current_tags + generated)
+        self._suppress_autosave = True
         self.list_tags.clear()
         for tag in combined[:20]:
             item = QListWidgetItem(tag)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
             self.list_tags.addItem(item)
+        self._suppress_autosave = False
+        # Автосохранение сразу после генерации
+        self._autosave_tags()
 
-    def _save_tags(self):
+    def _autosave_tags(self):
         if not self._current_id:
             return
         tags = [self.list_tags.item(i).text().strip()
                 for i in range(self.list_tags.count())]
         tags = normalize_hashtags(tags)
-        db.set_tiktok_hashtags(self._current_id, tags)
-        QMessageBox.information(self, "Сохранено", f"Сохранено {len(tags)} тегов.")
+        if db.set_tiktok_hashtags(self._current_id, tags):
+            self._show_saved(self.lbl_tags_saved, f"Сохранено ({len(tags)})")
 
     # Schedule ------------------------------------------------------
     _TIME_RE = re.compile(r"^\d{1,2}:\d{2}$")
@@ -587,6 +610,10 @@ class TikTokPage(BasePage):
     def _go_automation(self):
         if self._current_id:
             self.request_navigate_automation.emit(self._current_id)
+
+    def _show_saved(self, label: QLabel, text: str = "Сохранено"):
+        label.setText(f"✓ {text}")
+        QTimer.singleShot(2000, lambda: label.setText(""))
 
     def refresh(self):
         """Внешний вызов при переходе на страницу."""
