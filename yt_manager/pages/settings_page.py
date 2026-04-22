@@ -16,9 +16,10 @@ from typing import Optional
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame, QGridLayout,
-    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
-    QRadioButton, QSpinBox, QVBoxLayout, QWidget,
+    QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+    QFileDialog, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
+    QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton,
+    QSpinBox, QVBoxLayout, QWidget,
 )
 
 from pages.base_page import BasePage
@@ -39,46 +40,137 @@ YT_BROWSERS: list[str] = [
 COOKIES_TEST_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
 
+# Тестируем два разных видео: обычное + потенциально возрастное
+COOKIES_TEST_URLS: list[tuple[str, str]] = [
+    ("Обычное", "https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+    ("Возрастное", "https://www.youtube.com/watch?v=HyHNuVaZJ-k"),
+]
+
+
 class CookiesTestWorker(QThread):
-    """Фоновая проверка куки: пробует yt-dlp получить info тестового видео."""
+    """Фоновая проверка куки: пробует yt-dlp получить info тестовых видео.
 
-    finished_ok   = pyqtSignal(str)   # title
-    finished_fail = pyqtSignal(str)   # human-readable error
+    Проверяет два разных видео (обычное + возрастное) и собирает
+    детализированный отчёт: какие куки применяются, получены ли форматы,
+    полный текст ошибки при падении.
+    """
 
-    def __init__(self, mode: str, browser: str, file_path: str, parent=None):
+    finished_report = pyqtSignal(bool, str)  # ok, html/text report
+
+    def __init__(self, mode: str, browser: str, file_path: str,
+                 use_mobile: bool, parent=None):
         super().__init__(parent)
-        self.mode     = mode
-        self.browser  = browser
-        self.file_path = file_path
+        self.mode       = mode
+        self.browser    = browser
+        self.file_path  = file_path
+        self.use_mobile = use_mobile
+
+    def _build_opts(self) -> tuple[dict, str]:
+        """Формирует opts и описание применяемых куки."""
+        opts: dict = {"quiet": True, "no_warnings": True, "skip_download": True}
+        desc = ""
+        if self.mode == "browser":
+            opts["cookiesfrombrowser"] = (self.browser,)
+            desc = f"Из браузера {self.browser}"
+        elif self.mode == "file":
+            if not self.file_path or not os.path.isfile(self.file_path):
+                return {}, f"Файл cookies.txt не найден: {self.file_path}"
+            opts["cookiefile"] = self.file_path
+            # Считаем кол-во записей в файле (строки не-комментарии)
+            try:
+                with open(self.file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    lines = [ln for ln in f
+                             if ln.strip() and not ln.lstrip().startswith("#")]
+                desc = f"Из файла {self.file_path} ({len(lines)} записей)"
+            except Exception:
+                desc = f"Из файла {self.file_path}"
+        else:
+            desc = "Авто (куки не применяются — проверяем доступ по IP)"
+
+        if self.use_mobile:
+            opts["extractor_args"] = {
+                "youtube": {"player_client": ["ios", "android", "web"]}
+            }
+        return opts, desc
 
     def run(self):
         try:
             import yt_dlp
             from youtube_service import classify_download_error
         except Exception as e:
-            self.finished_fail.emit(f"yt-dlp недоступен: {e}")
+            self.finished_report.emit(False, f"yt-dlp недоступен: {e}")
             return
 
-        opts: dict = {"quiet": True, "no_warnings": True, "skip_download": True}
-        if self.mode == "browser":
-            opts["cookiesfrombrowser"] = (self.browser,)
-        elif self.mode == "file":
-            if not self.file_path or not os.path.isfile(self.file_path):
-                self.finished_fail.emit("Файл cookies.txt не найден.")
-                return
-            opts["cookiefile"] = self.file_path
-        # Для режима "auto" ничего не добавляем — yt-dlp отработает без куков,
-        # успех подтверждает, что YouTube разрешает доступ с текущего IP.
+        opts, desc = self._build_opts()
+        if not opts:
+            self.finished_report.emit(False, desc or "Не удалось подготовить опции")
+            return
 
+        lines: list[str] = []
+        lines.append(f"Применяется: {desc}")
+        lines.append(
+            f"Мобильные клиенты: {'ВКЛ (ios/android/web)' if self.use_mobile else 'выкл'}"
+        )
+        lines.append("")
+
+        ok_total = True
+        for label, url in COOKIES_TEST_URLS:
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                title = (info or {}).get("title") or "(без названия)"
+                fmts = (info or {}).get("formats") or []
+                heights = sorted({int(f.get("height") or 0) for f in fmts
+                                  if f.get("height")}, reverse=True)
+                heights_s = ", ".join(f"{h}p" for h in heights[:8]) or "—"
+                lines.append(f"✓ {label}: «{title}»")
+                lines.append(f"    Доступные форматы: {heights_s}")
+            except yt_dlp.utils.DownloadError as e:
+                ok_total = False
+                lines.append(f"✗ {label}: {classify_download_error(str(e))}")
+                lines.append(f"    Полный текст: {e}")
+            except Exception as e:
+                ok_total = False
+                lines.append(f"✗ {label}: {type(e).__name__}: {e}")
+
+        self.finished_report.emit(ok_total, "\n".join(lines))
+
+
+class YtDlpUpdateWorker(QThread):
+    """Запускает `pip install -U yt-dlp` в фоне; стримит stdout в сигнал."""
+
+    line_emitted = pyqtSignal(str)
+    finished_ok  = pyqtSignal(str)   # итоговый stdout
+    finished_fail = pyqtSignal(str)  # текст ошибки
+
+    def run(self):
+        import subprocess
+        import sys
         try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(COOKIES_TEST_URL, download=False)
-            title = (info or {}).get("title") or "(без названия)"
-            self.finished_ok.emit(title)
-        except yt_dlp.utils.DownloadError as e:
-            self.finished_fail.emit(classify_download_error(str(e)))
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "pip", "install", "-U", "yt-dlp"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace",
+            )
         except Exception as e:
-            self.finished_fail.emit(f"Ошибка: {e}")
+            self.finished_fail.emit(f"Не удалось запустить pip: {e}")
+            return
+
+        buf: list[str] = []
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.rstrip()
+            if line:
+                buf.append(line)
+                self.line_emitted.emit(line)
+        rc = proc.wait()
+        output = "\n".join(buf)
+        if rc == 0:
+            self.finished_ok.emit(output)
+        else:
+            self.finished_fail.emit(
+                f"pip завершился с кодом {rc}:\n{output}"
+            )
 
 
 # (name, title, bg, accent, text)
@@ -199,17 +291,75 @@ class SettingsPage(BasePage):
             lambda *_: self.rb_cookies_file.setChecked(True)
         )
 
+        # Чекбокс «Мобильные клиенты» — обход проверки бота
+        self.chk_mobile_clients = QCheckBox(
+            "Мобильные клиенты YouTube (обход проверки бота, ios/android/web)"
+        )
+        self.chk_mobile_clients.setToolTip(
+            "Использовать клиенты ios/android/web через extractor_args. "
+            "Часто решает ошибку «Sign in to confirm you're not a bot» "
+            "даже без куки. Рекомендуется держать ВКЛ."
+        )
+        lay.addWidget(self.chk_mobile_clients)
+
+        # Подсказка с реально применяемыми куками
+        self.lbl_applied_cookies = QLabel("")
+        self.lbl_applied_cookies.setWordWrap(True)
+        self.lbl_applied_cookies.setStyleSheet(
+            "color:#4f98a3; font-size:11px; font-weight:600;"
+        )
+        lay.addWidget(self.lbl_applied_cookies)
+
         row_test = QHBoxLayout()
         self.btn_cookies_test = QPushButton("Проверить куки")
         self.btn_cookies_test.clicked.connect(self._run_cookies_test)
         row_test.addWidget(self.btn_cookies_test)
+        self.btn_ytdlp_update = QPushButton("Обновить yt-dlp")
+        self.btn_ytdlp_update.setToolTip(
+            "Запускает `pip install -U yt-dlp`. Это решает большинство "
+            "ошибок «Sign in to confirm» при новых изменениях YouTube."
+        )
+        self.btn_ytdlp_update.clicked.connect(self._run_ytdlp_update)
+        row_test.addWidget(self.btn_ytdlp_update)
         self.lbl_cookies_status = QLabel("")
         self.lbl_cookies_status.setWordWrap(True)
         row_test.addWidget(self.lbl_cookies_status, 1)
         lay.addLayout(row_test)
 
         self._cookies_test_worker: Optional[CookiesTestWorker] = None
+        self._ytdlp_update_worker: Optional[YtDlpUpdateWorker] = None
+
+        # Обновлять подсказку при изменениях
+        for w in (self.rb_cookies_auto, self.rb_cookies_browser,
+                  self.rb_cookies_file):
+            w.toggled.connect(self._update_applied_cookies_label)
+        self.cmb_cookies_browser.currentTextChanged.connect(
+            lambda *_: self._update_applied_cookies_label()
+        )
+        self.ed_cookies_file.textChanged.connect(
+            lambda *_: self._update_applied_cookies_label()
+        )
         return g
+
+    def _update_applied_cookies_label(self):
+        """Показывает что именно применится при следующем запуске yt-dlp."""
+        mode = self._current_cookies_mode()
+        if mode == "browser":
+            br = self.cmb_cookies_browser.currentText().strip().lower()
+            text = f"Применяется: Из браузера {br}"
+        elif mode == "file":
+            path = self.ed_cookies_file.text().strip()
+            if path and os.path.isfile(path):
+                text = f"Применяется: Из файла {path}"
+            else:
+                text = f"⚠ Файл не найден: {path or '(путь пуст)'} — будет использована автологика"
+        else:
+            from youtube_service import AUTO_COOKIES_FILE
+            if os.path.isfile(AUTO_COOKIES_FILE):
+                text = f"Применяется: Авто → {AUTO_COOKIES_FILE}"
+            else:
+                text = "Применяется: Авто (будет попытка прочитать куки из браузера)"
+        self.lbl_applied_cookies.setText(text)
 
     def _pick_cookies_file(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -240,28 +390,95 @@ class SettingsPage(BasePage):
             mode=self._current_cookies_mode(),
             browser=self.cmb_cookies_browser.currentText().strip().lower(),
             file_path=self.ed_cookies_file.text().strip(),
+            use_mobile=bool(self.chk_mobile_clients.isChecked()),
             parent=self,
         )
-        self._cookies_test_worker.finished_ok.connect(self._on_cookies_ok)
-        self._cookies_test_worker.finished_fail.connect(self._on_cookies_fail)
+        self._cookies_test_worker.finished_report.connect(self._on_cookies_report)
         self._cookies_test_worker.finished.connect(
             lambda: self.btn_cookies_test.setEnabled(True)
         )
         self._cookies_test_worker.start()
 
-    def _on_cookies_ok(self, title: str):
-        self.lbl_cookies_status.setStyleSheet("color:#2e8b57; font-weight:700;")
-        self.lbl_cookies_status.setText(f"✓ Куки работают — получено видео «{title}»")
+    def _on_cookies_report(self, ok: bool, report: str):
+        if ok:
+            self.lbl_cookies_status.setStyleSheet("color:#2e8b57; font-weight:700;")
+            self.lbl_cookies_status.setText("✓ Куки работают (см. детали)")
+        else:
+            self.lbl_cookies_status.setStyleSheet("color:#d64545; font-weight:700;")
+            self.lbl_cookies_status.setText("✗ Проверка не прошла (см. детали)")
+        # Показываем подробный отчёт в прокручиваемом окне
+        self._show_cookies_report_dialog(ok, report)
 
-    def _on_cookies_fail(self, err: str):
-        self.lbl_cookies_status.setStyleSheet("color:#d64545; font-weight:700;")
-        self.lbl_cookies_status.setText(f"✗ {err}")
+    def _show_cookies_report_dialog(self, ok: bool, report: str):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Проверка куки — результат")
+        dlg.resize(720, 440)
+        v = QVBoxLayout(dlg)
+        title = QLabel("✓ Успешно" if ok else "✗ Ошибка")
+        title.setStyleSheet(
+            "color:#2e8b57; font-weight:700; font-size:14px;" if ok
+            else "color:#d64545; font-weight:700; font-size:14px;"
+        )
+        v.addWidget(title)
+        te = QPlainTextEdit()
+        te.setReadOnly(True)
+        te.setPlainText(report)
+        v.addWidget(te, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        bb.accepted.connect(dlg.accept)
+        v.addWidget(bb)
+        dlg.exec()
+
+    def _run_ytdlp_update(self):
+        if self._ytdlp_update_worker and self._ytdlp_update_worker.isRunning():
+            return
+        reply = QMessageBox.question(
+            self, "Обновить yt-dlp",
+            "Будет выполнено `pip install -U yt-dlp` в активном окружении.\n"
+            "Продолжить?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Обновление yt-dlp")
+        dlg.resize(720, 440)
+        v = QVBoxLayout(dlg)
+        v.addWidget(QLabel("Запуск `pip install -U yt-dlp`…"))
+        te = QPlainTextEdit()
+        te.setReadOnly(True)
+        v.addWidget(te, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        bb.rejected.connect(dlg.reject)
+        btn_close = bb.button(QDialogButtonBox.StandardButton.Close)
+        btn_close.setEnabled(False)
+        v.addWidget(bb)
+
+        self._ytdlp_update_worker = YtDlpUpdateWorker(parent=self)
+        w = self._ytdlp_update_worker
+        w.line_emitted.connect(lambda ln: te.appendPlainText(ln))
+        def _on_ok(out: str):
+            te.appendPlainText("")
+            te.appendPlainText("✓ Готово. Перезапустите приложение, чтобы "
+                               "новая версия yt-dlp вступила в силу.")
+            btn_close.setEnabled(True)
+        def _on_fail(err: str):
+            te.appendPlainText("")
+            te.appendPlainText(f"✗ Ошибка:\n{err}")
+            btn_close.setEnabled(True)
+        w.finished_ok.connect(_on_ok)
+        w.finished_fail.connect(_on_fail)
+        w.start()
+        dlg.exec()
 
     def _save_cookies_settings(self):
         db.set_setting("yt_cookies_mode", self._current_cookies_mode())
         db.set_setting("yt_cookies_browser",
                        self.cmb_cookies_browser.currentText().strip().lower())
         db.set_setting("yt_cookies_file", self.ed_cookies_file.text().strip())
+        db.set_setting("yt_use_mobile_clients",
+                       bool(self.chk_mobile_clients.isChecked()))
 
     def _build_theme_group(self) -> QGroupBox:
         g = QGroupBox("Тема оформления")
@@ -407,7 +624,15 @@ class SettingsPage(BasePage):
             self.rb_cookies_file.setChecked(True)
         else:
             self.rb_cookies_auto.setChecked(True)
+        # По умолчанию ВКЛ — helps обходить «Sign in to confirm»
+        mobile_raw = db.get_setting("yt_use_mobile_clients", True)
+        if isinstance(mobile_raw, str):
+            mobile = mobile_raw.strip().lower() not in ("0", "false", "no", "")
+        else:
+            mobile = True if mobile_raw is None else bool(mobile_raw)
+        self.chk_mobile_clients.setChecked(mobile)
         self.lbl_cookies_status.setText("")
+        self._update_applied_cookies_label()
 
     def _save_all(self):
         db.set_setting("disk_limit_gb", int(self.sp_disk_limit.value()))
