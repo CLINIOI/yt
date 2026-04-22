@@ -2,9 +2,9 @@
 #
 # Экспорт/импорт пресетов в JSON с ПОЛНЫМ переносом состояния:
 #     settings          — config.paths, диск, тема, bridge
-#     channels          — YouTube-каналы + связи с TikTok
+#     channels          — YouTube-каналы + связи с TikTok + automation
 #     tiktok_channels   — TikTok-каналы + хэштеги + расписание
-#     automation        — automation_settings на каждый TikTok-канал
+#     automation        — automation_settings на каждый YouTube-канал
 #     processing_settings — per-channel настройки обработки
 #
 # Обратная совместимость: старый формат v1 с единственной секцией
@@ -70,11 +70,13 @@ def build_full_preset(name: str = "snapshot",
         },
     }
 
-    # YouTube-каналы (без каскадного видео — это слишком много)
+    # YouTube-каналы (без каскадного видео — это слишком много).
+    # Automation с v2.1 ключуется по YouTube-каналу.
     channels_export = []
     for ch in db.get_all_channels():
         linked = db.list_tiktok_for_youtube(ch["id"])
         ps = db.get_processing_settings(ch["id"])
+        auto = db.get_automation_settings(ch["id"])
         channels_export.append({
             "url":           ch.get("url"),
             "title":         ch.get("title"),
@@ -92,21 +94,7 @@ def build_full_preset(name: str = "snapshot",
                     "output_folder", "output_format",
                 )
             },
-        })
-
-    # TikTok-каналы
-    tiktok_export = []
-    for tt in db.list_tiktok_channels():
-        auto = db.get_automation_settings(tt["id"])
-        tiktok_export.append({
-            "handle":          tt.get("handle"),
-            "display_name":    tt.get("display_name"),
-            "avatar_url":      tt.get("avatar_url"),
-            "hashtags":        tt.get("hashtags") or [],
-            "schedule":        tt.get("schedule") or [],
-            "clip_min_buffer": tt.get("clip_min_buffer", 10),
-            "enabled":         tt.get("enabled", 1),
-            "automation":      {
+            "automation":    {
                 k: auto.get(k) for k in (
                     "download_enabled", "min_duration_sec",
                     "max_duration_sec", "max_age_days",
@@ -116,6 +104,19 @@ def build_full_preset(name: str = "snapshot",
                     "publish_enabled",
                 )
             },
+        })
+
+    # TikTok-каналы
+    tiktok_export = []
+    for tt in db.list_tiktok_channels():
+        tiktok_export.append({
+            "handle":          tt.get("handle"),
+            "display_name":    tt.get("display_name"),
+            "avatar_url":      tt.get("avatar_url"),
+            "hashtags":        tt.get("hashtags") or [],
+            "schedule":        tt.get("schedule") or [],
+            "clip_min_buffer": tt.get("clip_min_buffer", 10),
+            "enabled":         tt.get("enabled", 1),
         })
 
     return {
@@ -331,6 +332,12 @@ def _apply_channel(ch: dict):
             **{k: v for k, v in proc.items() if v is not None}
         )
 
+    # automation — теперь на YouTube-канале
+    auto = ch.get("automation") or {}
+    clean_auto = {k: v for k, v in auto.items() if v is not None}
+    if clean_auto:
+        db.set_automation_settings(ch_id, **clean_auto)
+
     # TikTok-связки
     for handle in ch.get("tiktok_links") or []:
         tt = db.get_tiktok_channel_by_handle(handle)
@@ -368,7 +375,13 @@ def _apply_tiktok_channel(tt: dict):
     db.set_tiktok_hashtags(tt_id, tt.get("hashtags") or [])
     db.set_tiktok_schedule(tt_id, tt.get("schedule") or [])
 
-    auto = tt.get("automation") or {}
-    clean = {k: v for k, v in auto.items() if v is not None}
+    # Обратная совместимость с пресетами v2.0, где automation
+    # лежал в tiktok_channels: переносим на все привязанные YouTube.
+    legacy_auto = tt.get("automation") or {}
+    clean = {k: v for k, v in legacy_auto.items() if v is not None}
     if clean:
-        db.set_automation_settings(tt_id, **clean)
+        for yt in db.list_youtube_for_tiktok(tt_id):
+            try:
+                db.set_automation_settings(yt["id"], **clean)
+            except Exception:
+                pass
