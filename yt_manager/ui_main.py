@@ -334,7 +334,7 @@ class MainWindow(QMainWindow):
     def _refresh_dl_counter(self):
         try:
             from download_queue import queue_manager
-            active = queue_manager.active_count()
+            active = queue_manager.active_count
             self._dl_counter.setText(
                 f"{'⏬ ' if active else ''}Загрузок: {active}")
             self._dl_counter.setProperty("active", "true" if active else "false")
