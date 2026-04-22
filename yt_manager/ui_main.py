@@ -21,6 +21,7 @@ from PyQt6.QtGui import QCloseEvent
 
 from pages.channels_page    import ChannelsPage
 from pages.tiktok_page      import TikTokPage
+from pages.automation_page  import AutomationPage
 from pages.processing_page  import ProcessingPage
 from pages.folders_page     import FoldersPage
 from pages.stats_page       import StatsPage
@@ -287,14 +288,16 @@ class MainWindow(QMainWindow):
 
         self.page_channels    = ChannelsPage()
         self.page_tiktok      = TikTokPage()
-        self.page_processing  = ProcessingPage()
+        self.page_automation  = AutomationPage()
         self.page_folders     = FoldersPage()
         self.page_stats       = StatsPage()
         self.page_presets     = PresetsPage()
         self.page_typewriter  = TypewriterPage()
+        # ProcessingPage оставлен как внутренний инструмент — не в навигации
+        self.page_processing  = ProcessingPage()
 
         for page in [self.page_channels, self.page_tiktok,
-                     self.page_processing,
+                     self.page_automation,
                      self.page_folders, self.page_stats,
                      self.page_presets, self.page_typewriter]:
             self.stack.addWidget(page)
