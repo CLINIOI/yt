@@ -955,7 +955,8 @@ class SegmentCut(QWidget):
     def get_output_dir(self, title='') -> str:
         manual = self._out_edit.text().strip()
         if manual: return manual
-        parts = [BASE_DIR, 'processed']
+        from utils import DIR_PROCESSED
+        parts = [BASE_DIR, DIR_PROCESSED]
         if title: parts.append(_sanitize(title))
         return os.path.join(*parts)
 
@@ -1106,7 +1107,8 @@ class SegmentCompose(QWidget):
     def get_output_dir(self) -> str:
         manual = self._out_edit.text().strip()
         if manual: return manual
-        return os.path.join(BASE_DIR, 'processed', 'composition')
+        from utils import DIR_PROCESSED
+        return os.path.join(BASE_DIR, DIR_PROCESSED, 'composition')
 
     def get_render_settings(self) -> dict:
         fmt_map = {
