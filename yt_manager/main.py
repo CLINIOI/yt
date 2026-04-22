@@ -143,7 +143,27 @@ def main():
         msg.exec()
         sys.exit(1)
 
-    # 6. Главное окно
+    # 6. Одноразовая миграция имён файлов (удаление [XXXX])
+    try:
+        import logging
+        from utils import migrate_existing_filenames
+        _log = logging.getLogger("filenames_migration")
+        stats = migrate_existing_filenames(BASE_DIR, log=_log)
+        if stats.get("renamed") or stats.get("db_updated"):
+            _log.info(
+                "Миграция имён файлов: переименовано=%d, в БД обновлено=%d, "
+                "ошибок=%d",
+                stats.get("renamed", 0),
+                stats.get("db_updated", 0),
+                stats.get("errors", 0),
+            )
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception(
+            "migrate_existing_filenames упала — продолжаем запуск"
+        )
+
+    # 7. Главное окно
     from ui_main import MainWindow
     window = MainWindow(config)
     window.show()

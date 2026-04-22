@@ -150,3 +150,113 @@ def ensure_dir(path: str) -> str:
         except OSError:
             pass
     return path
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Миграция имён файлов: убираем [XXXX] из уже скачанных
+# ──────────────────────────────────────────────────────────────────────
+
+_MIGRATION_FLAG = "filenames_migrated_v1"
+
+
+def _iter_files(root: str):
+    """Генератор всех файлов в дереве root (без поднятия исключений)."""
+    if not root or not os.path.isdir(root):
+        return
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for fname in filenames:
+            yield dirpath, fname
+
+
+def migrate_existing_filenames(base_path: str, log=None) -> dict:
+    """
+    Одноразовая миграция: сканирует `downloads/`, `каналы/`, `обработанное/`
+    относительно `base_path`, и у всех файлов с кодами в квадратных скобках
+    убирает их через `strip_bracket_codes`. Попутно обновляет videos.file_path
+    в БД, если совпадает старый путь.
+
+    Повторный прогон защищён флагом `filenames_migrated_v1` в app_settings.
+    Возвращает статистику: {'renamed': N, 'db_updated': M, 'skipped': K, 'errors': E}.
+
+    Импорт БД — ленивый, чтобы утилиты оставались без обязательной
+    зависимости от db.py.
+    """
+    stats = {"renamed": 0, "db_updated": 0, "skipped": 0, "errors": 0}
+
+    try:
+        from db import db as _db
+    except Exception:
+        _db = None
+
+    # Проверяем флаг, если БД доступна
+    if _db is not None:
+        try:
+            if _db.get_setting(_MIGRATION_FLAG):
+                if log:
+                    log.info("migrate_existing_filenames: уже выполнялась — пропуск")
+                return stats
+        except Exception:
+            pass
+
+    roots = [
+        os.path.join(base_path, "downloads"),
+        os.path.join(base_path, "каналы"),
+        os.path.join(base_path, "обработанное"),
+    ]
+
+    path_map: dict[str, str] = {}
+    for root in roots:
+        for dirpath, fname in _iter_files(root):
+            cleaned = strip_bracket_codes(fname)
+            cleaned = sanitize_filename(cleaned)
+            if not cleaned or cleaned == fname:
+                stats["skipped"] += 1
+                continue
+            old = os.path.join(dirpath, fname)
+            new = os.path.join(dirpath, cleaned)
+            if os.path.exists(new):
+                # Не затираем существующий файл — оставляем как есть.
+                stats["skipped"] += 1
+                continue
+            try:
+                os.rename(old, new)
+                path_map[old] = new
+                stats["renamed"] += 1
+            except OSError as e:
+                if log:
+                    log.warning("rename fail %s → %s: %s", old, new, e)
+                stats["errors"] += 1
+
+    # БД: обновляем videos.file_path для переименованных
+    if _db is not None and path_map:
+        try:
+            conn = _db.conn
+            for old, new in path_map.items():
+                try:
+                    cur = conn.execute(
+                        "UPDATE videos SET file_path = ? WHERE file_path = ?",
+                        (new, old),
+                    )
+                    if cur.rowcount:
+                        stats["db_updated"] += cur.rowcount
+                except Exception as e:
+                    if log:
+                        log.warning("db update fail %s: %s", old, e)
+                    stats["errors"] += 1
+            try:
+                conn.commit()
+            except Exception:
+                pass
+        except Exception as e:
+            if log:
+                log.warning("db migration pass failed: %s", e)
+            stats["errors"] += 1
+
+    # Выставляем флаг ТОЛЬКО если прошли без критических ошибок обхода.
+    # Мелкие ошибки отдельных файлов — не блокируют флаг.
+    if _db is not None:
+        try:
+            _db.set_setting(_MIGRATION_FLAG, "1")
+        except Exception:
+            pass
+    return stats
