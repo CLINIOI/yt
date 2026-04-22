@@ -1476,6 +1476,86 @@ class Database:
         return [int(r[0]) for r in rows]
 
     # ─────────────────────────────────────────────────────────────────
+    # ПОЛНОЕ ОБНОВЛЕНИЕ ДАННЫХ
+    # ─────────────────────────────────────────────────────────────────
+
+    def full_refresh_all(self) -> dict:
+        """Единая точка «полного обновления» данных приложения.
+
+        Делает:
+          • Сбрасывает статус видео 'error' → 'new' (error_msg = NULL).
+          • Для каждого TikTok-канала пересчитывает статусы клипов
+            через recount_clip_statuses().
+          • Автогенерирует publish_script'ы для готовых клипов, у
+            которых ещё нет активного скрипта (пропускает клипы,
+            для которых auto_generate_script_for_clip вернул None).
+          • Обновляет video_count у каждого YouTube-канала по факту
+            записей в таблице videos.
+
+        Возвращает словарь со статистикой:
+            {
+              "errors_reset": int,
+              "clips_to_ready": int,
+              "clips_to_published": int,
+              "clips_missing": int,
+              "scripts_created": int,
+              "channels_updated": int,
+              "tiktok_channels": int,
+            }
+        """
+        stats = {
+            "errors_reset": 0,
+            "clips_to_ready": 0,
+            "clips_to_published": 0,
+            "clips_missing": 0,
+            "scripts_created": 0,
+            "channels_updated": 0,
+            "tiktok_channels": 0,
+        }
+
+        # 1. Сброс видео из error → new
+        cur = self.conn.execute(
+            "UPDATE videos SET status='new', error_msg=NULL "
+            "WHERE status='error'"
+        )
+        stats["errors_reset"] = cur.rowcount or 0
+
+        # 2. Обновляем video_count у YouTube-каналов (актуальный счётчик)
+        for ch in self.get_all_channels():
+            cid = ch["id"]
+            row = self.conn.execute(
+                "SELECT COUNT(*) AS n FROM videos WHERE channel_id = ?",
+                (cid,)
+            ).fetchone()
+            new_total = int(row["n"] if row else 0)
+            if int(ch.get("video_count") or 0) != new_total:
+                self.conn.execute(
+                    "UPDATE channels SET video_count = ? WHERE id = ?",
+                    (new_total, cid)
+                )
+                stats["channels_updated"] += 1
+
+        # 3. Для каждого TikTok-канала: пересчёт клипов + автогенерация скриптов
+        tt_channels = self.list_tiktok_channels()
+        stats["tiktok_channels"] = len(tt_channels)
+        for tt in tt_channels:
+            tt_id = tt["id"]
+            r = self.recount_clip_statuses(tt_id)
+            stats["clips_to_ready"]     += int(r.get("to_ready", 0))
+            stats["clips_to_published"] += int(r.get("to_published", 0))
+            stats["clips_missing"]      += int(r.get("missing", 0))
+
+            # Клипы, для которых нужно создать скрипт
+            ready_clips = self.list_clips(tt_id, status="ready")
+            for clip in ready_clips:
+                new_id = self.auto_generate_script_for_clip(clip["id"])
+                if new_id:
+                    stats["scripts_created"] += 1
+
+        self._commit()
+        return stats
+
+    # ─────────────────────────────────────────────────────────────────
     # НАСТРОЙКИ ПРИЛОЖЕНИЯ (key/value)
     # ─────────────────────────────────────────────────────────────────
 

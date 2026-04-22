@@ -156,3 +156,99 @@ QFrame#theme_card[selected="true"] {
 QFrame#auto_master {
     background: #0a0a0a; border: 2px solid #ffd400; border-radius: 4px;
 }
+
+/* ===== yt_manager: uniform page styles (do not remove) ===== */
+
+/* Заголовки страниц */
+QWidget#page_header {
+    background: #0a0a0a;
+    border-bottom: 1px solid #ffd400;
+}
+QLabel#page_heading {
+    color: #ffffff;
+    font-size: 20px;
+    font-weight: 700;
+}
+QLabel#page_subtitle {
+    color: #e0e0e0;
+    font-size: 12px;
+}
+
+/* Settings — общая область с прокруткой */
+QScrollArea#settings_scroll {
+    background: transparent;
+    border: none;
+}
+QWidget#settings_content {
+    background: transparent;
+}
+
+/* Подсказки и второстепенный текст */
+QLabel#settings_hint, QLabel#auto_hint, QLabel#theme_card_hint {
+    color: #ffffff;
+    font-size: 11px;
+}
+QLabel#settings_accent {
+    color: #ffd400;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+/* Метки состояний (settings_status + общие info/ok/err/off) */
+QLabel#settings_status { color: #ffffff; font-size: 12px; }
+QLabel#settings_status[state="info"]    { color: #00d4ff; font-weight: 600; }
+QLabel#settings_status[state="ok"]      { color: #00ff88; font-weight: 700; }
+QLabel#settings_status[state="err"]     { color: #ff3b3b; font-weight: 700; }
+QLabel#settings_status[state="off"]     { color: #ffffff; }
+
+/* Заголовки диалогов (результат проверки куки и т.п.) */
+QLabel#dlg_title_ok  { color: #00ff88; font-weight: 700; font-size: 14px; }
+QLabel#dlg_title_err { color: #ff3b3b; font-weight: 700; font-size: 14px; }
+
+/* Кнопки акцента (btn_primary) — используются на Настройках */
+QPushButton#btn_primary {
+    background: #ffd400;
+    color: #000000;
+    border: 1px solid #ffd400;
+    border-radius: 6px;
+    padding: 6px 14px;
+    font-weight: 600;
+}
+QPushButton#btn_primary:hover  { background: #303030; color: #ffffff; border-color: #ffd400; }
+QPushButton#btn_primary:pressed{ background: #181818; color: #ffffff; }
+QPushButton#btn_primary:disabled {
+    background: #181818; color: #e0e0e0; border-color: #ffd400;
+}
+
+/* Автоматизация — большая кнопка переключения (state=on/off) */
+QPushButton#auto_toggle {
+    background: #181818;
+    color: #ffffff;
+    border: 1px solid #ffd400;
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-size: 13px;
+    font-weight: 700;
+}
+QPushButton#auto_toggle:hover { background: #303030; }
+QPushButton#auto_toggle[state="on"] {
+    background: #ff3b3b; color: #ffffff; border-color: #ff3b3b;
+}
+QPushButton#auto_toggle[state="on"]:hover {
+    background: #ff3b3b;
+}
+QPushButton#auto_toggle[state="off"] {
+    background: #00ff88; color: #ffffff; border-color: #00ff88;
+}
+QPushButton#auto_toggle[state="off"]:hover {
+    background: #00ff88;
+}
+
+/* Автоматизация — индикатор состояния */
+QLabel#auto_state {
+    font-size: 14px; font-weight: 600; color: #e0e0e0;
+}
+QLabel#auto_state[state="off"]     { color: #ff3b3b; }
+QLabel#auto_state[state="waiting"] { color: #00ff88; }
+QLabel#auto_state[state="running"] { color: #ffd400; }
+

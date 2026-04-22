@@ -545,9 +545,18 @@ class StatsPage(BasePage):
         super().__init__(parent)
         self._period_days = 30
         self._worker = None
-        self.setStyleSheet(PAGE_STYLE)
+        self._apply_page_style_for_theme()
         self._build_ui()
         QTimer.singleShot(120, self.refresh)
+
+    def _apply_page_style_for_theme(self):
+        """PAGE_STYLE — только для тёмной темы; иначе глобальный QSS."""
+        try:
+            from db import db as _db
+            theme = (_db.get_setting("theme", "dark") or "dark").strip().lower()
+        except Exception:
+            theme = "dark"
+        self.setStyleSheet(PAGE_STYLE if theme == "dark" else "")
 
     def _make_period_button(self, text: str, days: int, checked=False):
         btn = QPushButton(text)

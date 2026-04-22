@@ -9,7 +9,9 @@
 
 import os
 import json
+import logging
 import shutil
+from typing import Optional
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
@@ -29,6 +31,8 @@ from pages.stats_page       import StatsPage
 from pages.presets_page     import PresetsPage
 from pages.settings_page    import SettingsPage
 from pages.typewriter_page  import TypewriterPage
+
+log = logging.getLogger(__name__)
 
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
@@ -79,6 +83,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("YT Manager")
         self.setMinimumSize(980, 640)
 
+        self._bridge = None  # type: Optional[object]
         self._build_ui()
         self._connect_signals()
         try:
@@ -88,6 +93,9 @@ class MainWindow(QMainWindow):
             self._theme = "dark"
         self.apply_theme(self._theme)
         self._restore_geometry()
+
+        # Автозапуск Bridge: если включён в настройках или выставлен bridge_auto_start
+        QTimer.singleShot(300, self._maybe_autostart_bridge)
 
         # Открываем первую страницу
         self._nav_buttons[0].setChecked(True)
@@ -290,6 +298,9 @@ class MainWindow(QMainWindow):
         if hasattr(self.page_settings, "theme_changed"):
             self.page_settings.theme_changed.connect(self.apply_theme)
 
+        if hasattr(self.page_settings, "bridge_toggle_requested"):
+            self.page_settings.bridge_toggle_requested.connect(self._on_bridge_toggle)
+
     # ── ТЕМА ──────────────────────────────────────────────────────────
     def apply_theme(self, name: str):
         """Загружает QSS-файл темы и применяет к приложению."""
@@ -301,6 +312,100 @@ class MainWindow(QMainWindow):
         else:
             self.setStyleSheet(qss)
         self._theme = name
+        # Переприменяем page-стили на тех страницах, где они есть:
+        # в тёмной теме держим PAGE_STYLE, в других — снимаем, чтобы каскадил глобальный QSS.
+        for attr in ("page_channels", "page_folders", "page_presets", "page_stats"):
+            page = getattr(self, attr, None)
+            if page is not None and hasattr(page, "_apply_page_style_for_theme"):
+                try:
+                    page._apply_page_style_for_theme()
+                except Exception:
+                    log.exception("re-apply page style failed for %s", attr)
+        # Для ChannelsPage используется модульная функция — вызовем напрямую
+        try:
+            from pages.channels_page import _apply_page_style_for_theme as _apply_ch
+            if getattr(self, "page_channels", None) is not None:
+                _apply_ch(self.page_channels)
+        except Exception:
+            pass
+
+    # TikTok Bridge
+    def _maybe_autostart_bridge(self):
+        """Вызывается при старте. Запускает Bridge, если включён в настройках."""
+        try:
+            from db import db
+            enabled = bool(db.get_setting("bridge_enabled", False))
+            auto_start = bool(db.get_setting("bridge_auto_start", False))
+        except Exception:
+            return
+        if enabled or auto_start:
+            self._on_bridge_toggle(True)
+
+    def _on_bridge_toggle(self, enabled: bool):
+        """Запускает/останавливает TikTok Bridge."""
+        try:
+            from tiktok.bridge import BridgeServer, BridgeConfig
+            from db import db
+        except Exception as e:
+            log.exception("cannot import BridgeServer")
+            self._statusbar.showMessage(f"Bridge: не удалось загрузить модуль: {e}", 6000)
+            if hasattr(self.page_settings, "set_bridge_state"):
+                self.page_settings.set_bridge_state("err", f"модуль недоступен: {e}")
+            return
+
+        if enabled:
+            if self._bridge is not None:
+                return
+            host = str(db.get_setting("bridge_host", "127.0.0.1") or "127.0.0.1")
+            try:
+                port = int(db.get_setting("bridge_port", 8765) or 8765)
+            except Exception:
+                port = 8765
+            token = str(db.get_setting("bridge_token", "1224444") or "1224444")
+            cfg = BridgeConfig(host=host, port=port, token=token)
+            srv = BridgeServer(cfg)
+            try:
+                srv.started_ok.connect(self._on_bridge_started_ok)
+                srv.error.connect(self._on_bridge_error)
+                srv.stopped.connect(self._on_bridge_stopped)
+            except Exception:
+                pass
+            self._bridge = srv
+            try:
+                srv.start()
+                self._statusbar.showMessage(
+                    f"TikTok Bridge: запуск на {host}:{port}…", 4000)
+            except Exception as e:
+                log.exception("bridge start failed")
+                self._bridge = None
+                if hasattr(self.page_settings, "set_bridge_state"):
+                    self.page_settings.set_bridge_state("err", str(e))
+                self._statusbar.showMessage(f"Bridge: ошибка запуска: {e}", 6000)
+        else:
+            srv = self._bridge
+            self._bridge = None
+            if srv is not None:
+                try:
+                    srv.stop()
+                except Exception:
+                    log.exception("bridge stop failed")
+            if hasattr(self.page_settings, "set_bridge_state"):
+                self.page_settings.set_bridge_state("off")
+            self._statusbar.showMessage("TikTok Bridge: остановлен", 4000)
+
+    def _on_bridge_started_ok(self, host: str, port: int, token: str):
+        if hasattr(self.page_settings, "set_bridge_state"):
+            self.page_settings.set_bridge_state("ok", f"{host}:{port}")
+        self._statusbar.showMessage(f"TikTok Bridge: работает на {host}:{port}", 5000)
+
+    def _on_bridge_error(self, msg: str):
+        if hasattr(self.page_settings, "set_bridge_state"):
+            self.page_settings.set_bridge_state("err", msg)
+        self._statusbar.showMessage(f"Bridge: {msg}", 8000)
+
+    def _on_bridge_stopped(self):
+        if hasattr(self.page_settings, "set_bridge_state"):
+            self.page_settings.set_bridge_state("off")
 
     # ── СЛОТЫ ─────────────────────────────────────────────────────────
     def _navigate(self, idx: int):
@@ -372,4 +477,11 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent):
         self._save_geometry()
+        # Останавливаем Bridge, если запущен
+        srv = getattr(self, "_bridge", None)
+        if srv is not None:
+            try:
+                srv.stop()
+            except Exception:
+                log.exception("bridge stop on close failed")
         super().closeEvent(event)
