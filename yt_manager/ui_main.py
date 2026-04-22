@@ -22,6 +22,7 @@ from PyQt6.QtGui import QCloseEvent
 from pages.channels_page    import ChannelsPage
 from pages.tiktok_page      import TikTokPage
 from pages.automation_page  import AutomationPage
+from pages.publish_page     import PublishPage
 from pages.processing_page  import ProcessingPage
 from pages.folders_page     import FoldersPage
 from pages.stats_page       import StatsPage
@@ -101,14 +102,15 @@ NAV_ITEMS = [
     ("📺", "  YouTube каналы", 0, "nav_btn"),
     ("🎵", "  TikTok каналы",  1, "nav_btn"),
     ("⚙️", "  Автоматизация",  2, "nav_btn"),
-    ("📁", "  Папки",          3, "nav_btn"),
-    ("📊", "  Статистика",     4, "nav_btn"),
-    ("🎛", "  Пресеты",        5, "nav_btn"),
-    ("🎬", "  Видео-генератор", 6, "nav_btn_tw"),
+    ("📤", "  Публикация",     3, "nav_btn"),
+    ("📁", "  Папки",          4, "nav_btn"),
+    ("📊", "  Статистика",     5, "nav_btn"),
+    ("🎛", "  Пресеты",        6, "nav_btn"),
+    ("🎬", "  Видео-генератор", 7, "nav_btn_tw"),
 ]
 
 # Страницы, которые обновляются при каждом переходе
-REFRESH_ON_VISIT: set[int] = {1, 3, 4}   # TikTok, Folders, Stats
+REFRESH_ON_VISIT: set[int] = {1, 2, 3, 4, 5}   # TikTok, Automation, Publish, Folders, Stats
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -205,7 +207,7 @@ class MainWindow(QMainWindow):
 
         for icon, label, idx, obj_name in NAV_ITEMS:
             # Добавляем разделитель перед вкладкой Typewriter
-            if idx == 6:
+            if idx == 7:
                 lay.addSpacing(8)
                 lay.addWidget(self._hdiv())
                 lay.addSpacing(8)
@@ -289,6 +291,7 @@ class MainWindow(QMainWindow):
         self.page_channels    = ChannelsPage()
         self.page_tiktok      = TikTokPage()
         self.page_automation  = AutomationPage()
+        self.page_publish     = PublishPage()
         self.page_folders     = FoldersPage()
         self.page_stats       = StatsPage()
         self.page_presets     = PresetsPage()
@@ -297,7 +300,7 @@ class MainWindow(QMainWindow):
         self.page_processing  = ProcessingPage()
 
         for page in [self.page_channels, self.page_tiktok,
-                     self.page_automation,
+                     self.page_automation, self.page_publish,
                      self.page_folders, self.page_stats,
                      self.page_presets, self.page_typewriter]:
             self.stack.addWidget(page)
@@ -311,6 +314,10 @@ class MainWindow(QMainWindow):
 
         if hasattr(self.page_tiktok, "request_navigate_automation"):
             self.page_tiktok.request_navigate_automation.connect(
+                lambda _tid: self._navigate(2)
+            )
+        if hasattr(self.page_publish, "request_open_automation"):
+            self.page_publish.request_open_automation.connect(
                 lambda _tid: self._navigate(2)
             )
 
