@@ -14,10 +14,11 @@ import os
 import shutil
 from typing import Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
-    QCheckBox, QFileDialog, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
-    QLineEdit, QMessageBox, QPushButton, QSpinBox, QVBoxLayout, QWidget,
+    QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame, QGridLayout,
+    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
+    QRadioButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from pages.base_page import BasePage
@@ -27,6 +28,57 @@ from db import db
 log = logging.getLogger(__name__)
 
 USERSCRIPT_REL = os.path.join("tiktok", "userscript", "helper.user.js")
+
+# Браузеры, которые yt-dlp умеет читать через --cookies-from-browser
+YT_BROWSERS: list[str] = [
+    "chrome", "firefox", "edge", "opera",
+    "brave", "vivaldi", "chromium", "safari",
+]
+
+# Тестовое публично-доступное видео для проверки куки
+COOKIES_TEST_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+
+class CookiesTestWorker(QThread):
+    """Фоновая проверка куки: пробует yt-dlp получить info тестового видео."""
+
+    finished_ok   = pyqtSignal(str)   # title
+    finished_fail = pyqtSignal(str)   # human-readable error
+
+    def __init__(self, mode: str, browser: str, file_path: str, parent=None):
+        super().__init__(parent)
+        self.mode     = mode
+        self.browser  = browser
+        self.file_path = file_path
+
+    def run(self):
+        try:
+            import yt_dlp
+            from youtube_service import classify_download_error
+        except Exception as e:
+            self.finished_fail.emit(f"yt-dlp недоступен: {e}")
+            return
+
+        opts: dict = {"quiet": True, "no_warnings": True, "skip_download": True}
+        if self.mode == "browser":
+            opts["cookiesfrombrowser"] = (self.browser,)
+        elif self.mode == "file":
+            if not self.file_path or not os.path.isfile(self.file_path):
+                self.finished_fail.emit("Файл cookies.txt не найден.")
+                return
+            opts["cookiefile"] = self.file_path
+        # Для режима "auto" ничего не добавляем — yt-dlp отработает без куков,
+        # успех подтверждает, что YouTube разрешает доступ с текущего IP.
+
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(COOKIES_TEST_URL, download=False)
+            title = (info or {}).get("title") or "(без названия)"
+            self.finished_ok.emit(title)
+        except yt_dlp.utils.DownloadError as e:
+            self.finished_fail.emit(classify_download_error(str(e)))
+        except Exception as e:
+            self.finished_fail.emit(f"Ошибка: {e}")
 
 
 # (name, title, bg, accent, text)
@@ -58,6 +110,7 @@ class SettingsPage(BasePage):
         root.setSpacing(12)
 
         root.addWidget(self._build_disk_group())
+        root.addWidget(self._build_cookies_group())
         root.addWidget(self._build_theme_group())
         root.addWidget(self._build_bridge_group())
         root.addWidget(self._build_userscript_group())
@@ -94,6 +147,121 @@ class SettingsPage(BasePage):
         row.addWidget(self.lbl_disk_status)
         lay.addLayout(row)
         return g
+
+    def _build_cookies_group(self) -> QGroupBox:
+        g = QGroupBox("YouTube — куки для скачивания")
+        lay = QVBoxLayout(g)
+
+        hint = QLabel(
+            "Если YouTube требует «Sign in to confirm you're not a bot», "
+            "выберите источник куки ниже. Для режима «Из браузера» браузер "
+            "должен быть установлен на этом же компьютере."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#8a8985; font-size:11px;")
+        lay.addWidget(hint)
+
+        self.rb_cookies_auto    = QRadioButton("Автоматически (cookies.txt рядом с проектом → браузер)")
+        self.rb_cookies_browser = QRadioButton("Из браузера:")
+        self.rb_cookies_file    = QRadioButton("Из файла cookies.txt:")
+        self._cookies_group = QButtonGroup(self)
+        self._cookies_group.addButton(self.rb_cookies_auto)
+        self._cookies_group.addButton(self.rb_cookies_browser)
+        self._cookies_group.addButton(self.rb_cookies_file)
+
+        lay.addWidget(self.rb_cookies_auto)
+
+        row_b = QHBoxLayout()
+        row_b.addWidget(self.rb_cookies_browser)
+        self.cmb_cookies_browser = QComboBox()
+        self.cmb_cookies_browser.addItems(YT_BROWSERS)
+        self.cmb_cookies_browser.setMaximumWidth(160)
+        row_b.addWidget(self.cmb_cookies_browser)
+        row_b.addStretch()
+        lay.addLayout(row_b)
+
+        row_f = QHBoxLayout()
+        row_f.addWidget(self.rb_cookies_file)
+        self.ed_cookies_file = QLineEdit()
+        self.ed_cookies_file.setPlaceholderText("полный путь к cookies.txt")
+        row_f.addWidget(self.ed_cookies_file, 1)
+        btn_pick = QPushButton("…")
+        btn_pick.setMaximumWidth(36)
+        btn_pick.clicked.connect(self._pick_cookies_file)
+        row_f.addWidget(btn_pick)
+        lay.addLayout(row_f)
+
+        # Автопереключение радио при активном действии
+        self.cmb_cookies_browser.activated.connect(
+            lambda *_: self.rb_cookies_browser.setChecked(True)
+        )
+        self.ed_cookies_file.textEdited.connect(
+            lambda *_: self.rb_cookies_file.setChecked(True)
+        )
+
+        row_test = QHBoxLayout()
+        self.btn_cookies_test = QPushButton("Проверить куки")
+        self.btn_cookies_test.clicked.connect(self._run_cookies_test)
+        row_test.addWidget(self.btn_cookies_test)
+        self.lbl_cookies_status = QLabel("")
+        self.lbl_cookies_status.setWordWrap(True)
+        row_test.addWidget(self.lbl_cookies_status, 1)
+        lay.addLayout(row_test)
+
+        self._cookies_test_worker: Optional[CookiesTestWorker] = None
+        return g
+
+    def _pick_cookies_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Выберите cookies.txt",
+            self.ed_cookies_file.text() or "",
+            "Cookies (*.txt);;Все файлы (*.*)"
+        )
+        if path:
+            self.ed_cookies_file.setText(path)
+            self.rb_cookies_file.setChecked(True)
+
+    def _current_cookies_mode(self) -> str:
+        if self.rb_cookies_browser.isChecked():
+            return "browser"
+        if self.rb_cookies_file.isChecked():
+            return "file"
+        return "auto"
+
+    def _run_cookies_test(self):
+        if self._cookies_test_worker and self._cookies_test_worker.isRunning():
+            return
+        # Сохраняем текущие настройки, чтобы тест использовал их
+        self._save_cookies_settings()
+        self.btn_cookies_test.setEnabled(False)
+        self.lbl_cookies_status.setStyleSheet("color:#8a8985;")
+        self.lbl_cookies_status.setText("Проверка…")
+        self._cookies_test_worker = CookiesTestWorker(
+            mode=self._current_cookies_mode(),
+            browser=self.cmb_cookies_browser.currentText().strip().lower(),
+            file_path=self.ed_cookies_file.text().strip(),
+            parent=self,
+        )
+        self._cookies_test_worker.finished_ok.connect(self._on_cookies_ok)
+        self._cookies_test_worker.finished_fail.connect(self._on_cookies_fail)
+        self._cookies_test_worker.finished.connect(
+            lambda: self.btn_cookies_test.setEnabled(True)
+        )
+        self._cookies_test_worker.start()
+
+    def _on_cookies_ok(self, title: str):
+        self.lbl_cookies_status.setStyleSheet("color:#2e8b57; font-weight:700;")
+        self.lbl_cookies_status.setText(f"✓ Куки работают — получено видео «{title}»")
+
+    def _on_cookies_fail(self, err: str):
+        self.lbl_cookies_status.setStyleSheet("color:#d64545; font-weight:700;")
+        self.lbl_cookies_status.setText(f"✗ {err}")
+
+    def _save_cookies_settings(self):
+        db.set_setting("yt_cookies_mode", self._current_cookies_mode())
+        db.set_setting("yt_cookies_browser",
+                       self.cmb_cookies_browser.currentText().strip().lower())
+        db.set_setting("yt_cookies_file", self.ed_cookies_file.text().strip())
 
     def _build_theme_group(self) -> QGroupBox:
         g = QGroupBox("Тема оформления")
@@ -226,12 +394,28 @@ class SettingsPage(BasePage):
         self.sp_bridge_port.setValue(int(db.get_setting("bridge_port", 8765) or 8765))
         self.ed_bridge_token.setText(str(db.get_setting("bridge_token", "1224444") or ""))
 
+        # ── Куки YouTube ────────────────────────────────────────────
+        mode = (db.get_setting("yt_cookies_mode", "auto") or "auto").strip().lower()
+        browser = (db.get_setting("yt_cookies_browser", "chrome") or "chrome").strip().lower()
+        cookies_file = str(db.get_setting("yt_cookies_file", "") or "")
+        if browser in YT_BROWSERS:
+            self.cmb_cookies_browser.setCurrentText(browser)
+        self.ed_cookies_file.setText(cookies_file)
+        if mode == "browser":
+            self.rb_cookies_browser.setChecked(True)
+        elif mode == "file":
+            self.rb_cookies_file.setChecked(True)
+        else:
+            self.rb_cookies_auto.setChecked(True)
+        self.lbl_cookies_status.setText("")
+
     def _save_all(self):
         db.set_setting("disk_limit_gb", int(self.sp_disk_limit.value()))
         db.set_setting("bridge_auto_start", bool(self.chk_bridge_auto.isChecked()))
         db.set_setting("bridge_host", self.ed_bridge_host.text().strip() or "127.0.0.1")
         db.set_setting("bridge_port", int(self.sp_bridge_port.value()))
         db.set_setting("bridge_token", self.ed_bridge_token.text().strip() or "1224444")
+        self._save_cookies_settings()
         QMessageBox.information(self, "Сохранено", "Настройки сохранены.")
 
     # ── Actions ────────────────────────────────────────────────────

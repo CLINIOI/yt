@@ -7,12 +7,125 @@
 import os
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional, Callable
 
 import yt_dlp
 from PyQt6.QtCore import QThread, pyqtSignal
 
 log = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# КЛАССИФИКАЦИЯ ОШИБОК yt-dlp
+# ─────────────────────────────────────────────────────────────────────
+
+COOKIES_HINT = (
+    "Откройте Настройки → «YouTube — куки для скачивания» "
+    "и выберите браузер или файл cookies.txt."
+)
+
+
+def classify_download_error(err_text: str) -> str:
+    """Возвращает понятное русскоязычное сообщение по тексту ошибки yt-dlp.
+
+    Используется для логов пайплайна и UI-баннеров. Префикс `[!]` помогает
+    AutomationPage подсветить строку.
+    """
+    low = (err_text or "").lower()
+    if ("sign in to confirm" in low) or ("not a bot" in low) \
+            or ("confirm you" in low) or ("use --cookies" in low):
+        return (f"[!] Требуются куки YouTube. {COOKIES_HINT}")
+    if "429" in low or "too many requests" in low or "rate" in low and "limit" in low:
+        return "[!] YouTube ограничил частоту запросов (429). Попробуйте позже."
+    if "age" in low and ("restrict" in low or "confirm" in low or "gate" in low):
+        return ("[!] Видео с возрастным ограничением — нужны куки "
+                f"авторизованного аккаунта. {COOKIES_HINT}")
+    if "private video" in low:
+        return "[!] Видео приватное — доступ невозможен."
+    if "video unavailable" in low or "removed" in low:
+        return "[!] Видео недоступно (удалено или скрыто)."
+    # Иначе — отдаём исходный текст
+    return err_text or "Неизвестная ошибка yt-dlp"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# ОПЦИИ КУКИ (глобальные, управляются настройками)
+# ─────────────────────────────────────────────────────────────────────
+
+_SUPPORTED_BROWSERS = (
+    "chrome", "firefox", "edge", "opera", "brave",
+    "vivaldi", "chromium", "safari",
+)
+
+# Файл cookies.txt рядом с проектом (используется в режиме "auto")
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+AUTO_COOKIES_FILE = os.path.join(_PROJECT_ROOT, "cookies.txt")
+
+
+def _auto_resolve_cookies() -> dict:
+    """Старая автологика: cookies.txt рядом с проектом → первый доступный браузер."""
+    if os.path.isfile(AUTO_COOKIES_FILE):
+        return {"cookiefile": AUTO_COOKIES_FILE}
+    try:
+        import yt_dlp.cookies as _ck
+        for _br in ("chrome", "firefox", "edge", "brave", "opera"):
+            try:
+                _ck.load_cookies_from_browser(_br)
+                return {"cookiesfrombrowser": (_br,)}
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return {}
+
+
+def _resolve_cookie_opts(db=None) -> dict:
+    """Возвращает словарь опций для yt-dlp на основе настроек пользователя.
+
+    Режимы (ключ app_settings `yt_cookies_mode`):
+        "auto"    — текущая автологика (cookies.txt → браузер).
+        "browser" — явный браузер из `yt_cookies_browser`.
+        "file"    — cookies.txt по пути `yt_cookies_file`.
+
+    Если db не передан — используем глобальный инстанс `db` из модуля db.
+    При любой ошибке откатываемся на автологику (обратная совместимость).
+    """
+    try:
+        if db is None:
+            from db import db as _db
+            db = _db
+    except Exception:
+        db = None
+
+    mode = "auto"
+    try:
+        if db is not None:
+            mode = (db.get_setting("yt_cookies_mode", "auto") or "auto").strip().lower()
+    except Exception:
+        mode = "auto"
+
+    if mode == "browser":
+        try:
+            browser = (db.get_setting("yt_cookies_browser", "chrome") or "chrome").strip().lower()
+        except Exception:
+            browser = "chrome"
+        if browser not in _SUPPORTED_BROWSERS:
+            browser = "chrome"
+        return {"cookiesfrombrowser": (browser,)}
+
+    if mode == "file":
+        try:
+            path = (db.get_setting("yt_cookies_file", "") or "").strip()
+        except Exception:
+            path = ""
+        if path and Path(path).exists():
+            return {"cookiefile": path}
+        # Файл не найден — откат на авто
+        log.warning("yt_cookies_file не существует (%s), откат на auto", path)
+        return _auto_resolve_cookies()
+
+    return _auto_resolve_cookies()
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -115,37 +228,23 @@ class YouTubeService:
         "audio": "bestaudio*/best",
     }
 
-    # Файл cookies.txt рядом с проектом (если есть — используется автоматически)
-    COOKIES_FILE: str = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "cookies.txt"
-    )
+    def __init__(self):
+        # Последнее понятное сообщение об ошибке (для UI)
+        self._last_error_message: str = ""
+
+    @property
+    def last_error_message(self) -> str:
+        return self._last_error_message
+
+    # Обратная совместимость — сохраняем путь к файлу cookies.txt
+    COOKIES_FILE: str = AUTO_COOKIES_FILE
 
     def _cookie_opts(self) -> dict:
+        """Опции куки для yt-dlp — используют настройки пользователя.
+
+        Делегируется в `_resolve_cookie_opts` (auto / browser / file).
         """
-        Возвращает опции авторизации для yt-dlp.
-        Приоритет: cookies.txt → браузер (без DPAPI) → без куков.
-        """
-        # 1) Файл cookies.txt рядом с проектом
-        if os.path.isfile(self.COOKIES_FILE):
-            return {"cookiefile": self.COOKIES_FILE}
-        # 2) Браузер без DPAPI-расшифровки (Chrome 127+ совместимо)
-        try:
-            import yt_dlp.cookies as _ck
-            # Проверяем доступность chrome
-            browsers = []
-            for _br in ("chrome", "firefox", "edge", "brave", "opera"):
-                try:
-                    _ck.load_cookies_from_browser(_br)
-                    browsers.append(_br)
-                    break
-                except Exception:
-                    continue
-            if browsers:
-                return {"cookiesfrombrowser": (browsers[0],)}
-        except Exception:
-            pass
-        return {}
+        return _resolve_cookie_opts()
 
 
 
@@ -196,7 +295,9 @@ class YouTubeService:
                 video_count=video_count,
             )
         except yt_dlp.utils.DownloadError as e:
-            log.error("get_channel_info DownloadError [%s]: %s", url, e)
+            human = classify_download_error(str(e))
+            self._last_error_message = human
+            log.error("get_channel_info DownloadError [%s]: %s | %s", url, e, human)
         except Exception as e:
             log.exception("get_channel_info unexpected error [%s]: %s", url, e)
         return None
@@ -219,6 +320,7 @@ class YouTubeService:
             "no_warnings":  True,
             "extract_flat": "in_playlist",
             **({"playlistend": limit} if limit > 0 else {}),
+            **self._cookie_opts(),
         }
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -259,7 +361,9 @@ class YouTubeService:
             return result
 
         except yt_dlp.utils.DownloadError as e:
-            log.error("get_channel_videos DownloadError [%s]: %s", url, e)
+            human = classify_download_error(str(e))
+            self._last_error_message = human
+            log.error("get_channel_videos DownloadError [%s]: %s | %s", url, e, human)
         except Exception as e:
             log.exception("get_channel_videos unexpected error [%s]: %s", url, e)
         return []
@@ -319,6 +423,7 @@ class YouTubeService:
             "no_warnings":  True,
             "extract_flat": "in_playlist",
             **({"playlistend": limit} if limit > 0 else {}),
+            **self._cookie_opts(),
         }
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -344,6 +449,7 @@ class YouTubeService:
         opts = {
             "quiet":       True,
             "no_warnings": True,
+            **self._cookie_opts(),
         }
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -479,7 +585,10 @@ class YouTubeService:
             return None
 
         except yt_dlp.utils.DownloadError as e:
-            log.error("download_video DownloadError [%s]: %s", yt_id_or_url, e)
+            human = classify_download_error(str(e))
+            log.error("download_video DownloadError [%s]: %s | %s",
+                      yt_id_or_url, e, human)
+            self._last_error_message = human
             if progress_callback:
                 progress_callback(DownloadProgress(status="error"))
             return None
@@ -595,7 +704,8 @@ class DownloadWorker(QThread):
             self.download_finished.emit(self.video_id, result)
         else:
             if not self._cancel[0]:
-                self.download_error.emit(self.video_id, "Ошибка скачивания")
+                msg = self._service.last_error_message or "Ошибка скачивания"
+                self.download_error.emit(self.video_id, msg)
 
     def cancel(self):
         """Отменяет скачивание. Поток завершится при следующем хуке прогресса."""
