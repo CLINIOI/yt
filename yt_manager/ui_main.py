@@ -50,18 +50,20 @@ def _load_theme_qss(name: str) -> str:
 
 NAV_ITEMS = [
     ("📺", "  YouTube каналы", 0, "nav_btn"),
-    ("🎵", "  TikTok каналы",  1, "nav_btn"),
-    ("⚙️", "  Автоматизация",  2, "nav_btn"),
-    ("📤", "  Публикация",     3, "nav_btn"),
-    ("📁", "  Папки",          4, "nav_btn"),
-    ("📊", "  Статистика",     5, "nav_btn"),
-    ("🎛", "  Пресеты",        6, "nav_btn"),
-    ("🛠", "  Настройки",      7, "nav_btn"),
-    ("🎬", "  Видео-генератор", 8, "nav_btn_tw"),
+    ("⚙️", "  Автоматизация",  1, "nav_btn"),
+    ("🎞", "  Обработка",      2, "nav_btn"),
+    ("🎵", "  TikTok каналы",  3, "nav_btn"),
+    ("📤", "  Публикация",     4, "nav_btn"),
+    ("📁", "  Папки",          5, "nav_btn"),
+    ("📊", "  Статистика",     6, "nav_btn"),
+    ("🎛", "  Пресеты",        7, "nav_btn"),
+    ("🛠", "  Настройки",      8, "nav_btn"),
+    ("🎬", "  Видео-генератор", 9, "nav_btn_tw"),
 ]
 
 # Страницы, которые обновляются при каждом переходе
-REFRESH_ON_VISIT: set[int] = {1, 2, 3, 4, 5, 7}   # TikTok, Automation, Publish, Folders, Stats, Settings
+# (Автоматизация, Обработка, TikTok, Публикация, Папки, Статистика, Настройки)
+REFRESH_ON_VISIT: set[int] = {1, 2, 3, 4, 5, 6, 8}
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -162,8 +164,8 @@ class MainWindow(QMainWindow):
         self._nav_buttons = []
 
         for icon, label, idx, obj_name in NAV_ITEMS:
-            # Добавляем разделитель перед вкладкой Typewriter
-            if idx == 8:
+            # Добавляем разделитель перед вкладкой «Видео-генератор»
+            if idx == 9:
                 lay.addSpacing(8)
                 lay.addWidget(self._hdiv())
                 lay.addSpacing(8)
@@ -245,22 +247,22 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
 
         self.page_channels    = ChannelsPage()
-        self.page_tiktok      = TikTokPage()
         self.page_automation  = AutomationPage()
+        self.page_processing  = ProcessingPage()
+        self.page_tiktok      = TikTokPage()
         self.page_publish     = PublishPage()
         self.page_folders     = FoldersPage()
         self.page_stats       = StatsPage()
         self.page_presets     = PresetsPage()
         self.page_settings    = SettingsPage()
         self.page_typewriter  = TypewriterPage()
-        # ProcessingPage оставлен как внутренний инструмент — не в навигации
-        self.page_processing  = ProcessingPage()
 
-        for page in [self.page_channels, self.page_tiktok,
-                     self.page_automation, self.page_publish,
-                     self.page_folders, self.page_stats,
-                     self.page_presets, self.page_settings,
-                     self.page_typewriter]:
+        # Порядок страниц в стеке соответствует индексам NAV_ITEMS
+        for page in [self.page_channels, self.page_automation,
+                     self.page_processing, self.page_tiktok,
+                     self.page_publish, self.page_folders,
+                     self.page_stats, self.page_presets,
+                     self.page_settings, self.page_typewriter]:
             self.stack.addWidget(page)
 
         return self.stack
@@ -272,11 +274,11 @@ class MainWindow(QMainWindow):
 
         if hasattr(self.page_tiktok, "request_navigate_automation"):
             self.page_tiktok.request_navigate_automation.connect(
-                lambda _tid: self._navigate(2)
+                lambda _tid: self._navigate(1)
             )
         if hasattr(self.page_publish, "request_open_automation"):
             self.page_publish.request_open_automation.connect(
-                lambda _tid: self._navigate(2)
+                lambda _tid: self._navigate(1)
             )
 
         if hasattr(self.page_channels, "download_started"):
@@ -315,7 +317,7 @@ class MainWindow(QMainWindow):
     def _on_preset_applied(self, preset_name: str):
         self._statusbar.showMessage(f"Пресет «{preset_name}» применён", 4000)
         # После применения пресета — переходим в Автоматизацию
-        self._navigate(2)
+        self._navigate(1)
 
     def _on_download_finished(self):
         self._refresh_dl_counter()
