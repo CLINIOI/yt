@@ -524,6 +524,31 @@ def probe_resolution(path: str) -> str:
         return ''
 
 
+def _format_duration(seconds: float) -> str:
+    """H:MM:SS или M:SS."""
+    try:
+        s = int(float(seconds) or 0)
+    except (TypeError, ValueError):
+        return ''
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+
+
+def _lookup_duration_in_db(path: str) -> float:
+    """Ищет длительность видео по file_path в таблице videos. 0.0 если нет."""
+    try:
+        row = db.conn.execute(
+            "SELECT duration FROM videos WHERE file_path = ? LIMIT 1",
+            (path,),
+        ).fetchone()
+        if row:
+            return float(row["duration"] or 0.0)
+    except Exception:
+        pass
+    return 0.0
+
+
 class _NumItem(QTableWidgetItem):
     def __lt__(self, other) -> bool:
         a = self.data(Qt.ItemDataRole.UserRole) or 0
@@ -861,15 +886,24 @@ class FileTableWidget(QFrame):
             name_item.setData(Qt.ItemDataRole.UserRole, entry.path)
             self._table.setItem(row, self.COL_NAME, name_item)
 
-            # 1 — Длина (заглушка для видео; числовая сортировка)
+            # 1 — Длина видео. Ячейка заполнится в _on_duration_ready
+            # (фоновый VideoDurationWorker через ffprobe). Для корректной
+            # сортировки используется _NumItem c числовым UserRole.
             dur_item = _NumItem('')
             dur_item.setData(Qt.ItemDataRole.UserRole, 0)
             dur_item.setForeground(QColor('#5a5957'))
             dur_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
             if ext in VIDEO_EXTS:
-                dur_item.setText('...')
-                video_paths.append(entry.path)
-                self._path_to_row[entry.path] = row
+                # Сначала пробуем достать duration из БД (быстрее ffprobe);
+                # если нет — отдадим воркеру.
+                db_dur = _lookup_duration_in_db(entry.path)
+                if db_dur and db_dur > 0:
+                    dur_item.setText(_format_duration(db_dur))
+                    dur_item.setData(Qt.ItemDataRole.UserRole, float(db_dur))
+                else:
+                    dur_item.setText('...')
+                    video_paths.append(entry.path)
+                    self._path_to_row[entry.path] = row
             self._table.setItem(row, self.COL_DUR, dur_item)
 
             # 2 — Размер (числовая сортировка по байтам)
