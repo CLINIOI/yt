@@ -20,6 +20,7 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QCloseEvent
 
 from pages.channels_page    import ChannelsPage
+from pages.tiktok_page      import TikTokPage
 from pages.processing_page  import ProcessingPage
 from pages.folders_page     import FoldersPage
 from pages.stats_page       import StatsPage
@@ -96,16 +97,17 @@ QStatusBar::item { border: none; }
 """
 
 NAV_ITEMS = [
-    ("📺", "  Каналы",       0, "nav_btn"),
-    ("⚙️", "  Обработка",    1, "nav_btn"),
-    ("📁", "  Папки",        2, "nav_btn"),
-    ("📊", "  Статистика",   3, "nav_btn"),
-    ("🎛", "  Пресеты",      4, "nav_btn"),
-    ("🎬", "  Видео-генератор", 5, "nav_btn_tw"),
+    ("📺", "  YouTube каналы", 0, "nav_btn"),
+    ("🎵", "  TikTok каналы",  1, "nav_btn"),
+    ("⚙️", "  Автоматизация",  2, "nav_btn"),
+    ("📁", "  Папки",          3, "nav_btn"),
+    ("📊", "  Статистика",     4, "nav_btn"),
+    ("🎛", "  Пресеты",        5, "nav_btn"),
+    ("🎬", "  Видео-генератор", 6, "nav_btn_tw"),
 ]
 
 # Страницы, которые обновляются при каждом переходе
-REFRESH_ON_VISIT: set[int] = {2, 3}   # FoldersPage, StatsPage
+REFRESH_ON_VISIT: set[int] = {1, 3, 4}   # TikTok, Folders, Stats
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -202,7 +204,7 @@ class MainWindow(QMainWindow):
 
         for icon, label, idx, obj_name in NAV_ITEMS:
             # Добавляем разделитель перед вкладкой Typewriter
-            if idx == 5:
+            if idx == 6:
                 lay.addSpacing(8)
                 lay.addWidget(self._hdiv())
                 lay.addSpacing(8)
@@ -284,13 +286,15 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
 
         self.page_channels    = ChannelsPage()
+        self.page_tiktok      = TikTokPage()
         self.page_processing  = ProcessingPage()
         self.page_folders     = FoldersPage()
         self.page_stats       = StatsPage()
         self.page_presets     = PresetsPage()
         self.page_typewriter  = TypewriterPage()
 
-        for page in [self.page_channels, self.page_processing,
+        for page in [self.page_channels, self.page_tiktok,
+                     self.page_processing,
                      self.page_folders, self.page_stats,
                      self.page_presets, self.page_typewriter]:
             self.stack.addWidget(page)
@@ -301,6 +305,11 @@ class MainWindow(QMainWindow):
     def _connect_signals(self):
         self.stack.currentChanged.connect(self._on_page_changed)
         self.page_presets.preset_applied.connect(self._on_preset_applied)
+
+        if hasattr(self.page_tiktok, "request_navigate_automation"):
+            self.page_tiktok.request_navigate_automation.connect(
+                lambda _tid: self._navigate(2)
+            )
 
         if hasattr(self.page_channels, "download_started"):
             self.page_channels.download_started.connect(self._refresh_dl_counter)
@@ -322,7 +331,8 @@ class MainWindow(QMainWindow):
 
     def _on_preset_applied(self, preset_name: str):
         self._statusbar.showMessage(f"Пресет «{preset_name}» применён", 4000)
-        self._navigate(1)
+        # После применения пресета — переходим в Автоматизацию
+        self._navigate(2)
 
     def _on_download_finished(self):
         self._refresh_dl_counter()
