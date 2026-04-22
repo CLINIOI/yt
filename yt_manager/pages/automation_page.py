@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
 from pages.base_page import BasePage
 from db import db
 from utils import sanitize_dirname, clean_video_name, get_project_base
+from video_service import validate_processing_dirs, pick_first_video
 
 
 log = logging.getLogger(__name__)
@@ -206,9 +207,23 @@ class ClipPrepWorker(QThread):
 
         videos = db.get_videos_by_channel(self.channel_id, status="processed")
         if not videos:
-            self.progress.emit("Нет обработанных видео для нарезки.")
-            self.finished_.emit(0, 0)
-            return
+            # Фолбэк: если «обработанное/» пусто (например, при невалидных
+            # папках авто-монтажа) — режем из «каналы/» чтобы пайплайн
+            # давал хоть какой-то результат.
+            fallback = [
+                v for v in db.get_videos_by_channel(self.channel_id, status="downloaded")
+                if v.get("file_path") and os.path.isfile(v["file_path"])
+            ]
+            if fallback:
+                self.progress.emit(
+                    f"Нет обработанных видео — fallback: нарезаю {len(fallback)} "
+                    f"скачанных напрямую."
+                )
+                videos = fallback
+            else:
+                self.progress.emit("Нет подходящих видео для нарезки.")
+                self.finished_.emit(0, 0)
+                return
 
         total_clips = 0
         total_videos = 0
@@ -279,6 +294,123 @@ class ClipPrepWorker(QThread):
 
 
 # ──────────────────────────────────────────────────────────────────────
+# WORKER: авто-монтаж (композиция) скачанных видео канала
+# ──────────────────────────────────────────────────────────────────────
+
+class AutoMontageWorker(QThread):
+    """Последовательно прогоняет все скачанные, но ещё не обработанные видео
+    канала через video_service.stack_videos. Из указанных папок берётся
+    ПЕРВЫЙ видеофайл для каждого слоя (баннер / удержание / фон) — если
+    папка не задана или пуста, слой пропускается.
+
+    Готовые файлы складываются в
+        <project>/обработанное/<tiktok_handle>/<имя>.mp4
+    (при отсутствии привязанного TikTok-канала — <project>/обработанное/_<channel_id>/).
+    Статус видео в БД меняется на 'processed', в file_path пишется путь к
+    смонтированному файлу.
+    """
+
+    progress  = pyqtSignal(str)
+    finished_ = pyqtSignal(int, int)   # succeeded, failed
+    failed    = pyqtSignal(str)
+
+    def __init__(self,
+                 channel_id: int,
+                 banner_dir: Optional[str],
+                 retention_dir: Optional[str],
+                 background_dir: Optional[str],
+                 parent=None):
+        super().__init__(parent)
+        self.channel_id    = int(channel_id)
+        self.banner_dir    = banner_dir
+        self.retention_dir = retention_dir
+        self.background_dir = background_dir
+
+    def _resolve_out_dir(self) -> str:
+        """Папка вывода: обработанное/<handle>/ (первый привязанный TikTok)
+        или обработанное/_<channel_id>/ как фолбэк."""
+        base = os.path.join(get_project_base(), "обработанное")
+        try:
+            tt_list = db.list_tiktok_for_youtube(self.channel_id)
+        except Exception:
+            tt_list = []
+        if tt_list:
+            handle = tt_list[0].get("handle") or f"ch_{self.channel_id}"
+            return os.path.join(base, sanitize_dirname(handle))
+        return os.path.join(base, f"_ch_{self.channel_id}")
+
+    def run(self):
+        try:
+            from video_service import video_service
+        except Exception as e:
+            self.failed.emit(f"video_service недоступен: {e}")
+            return
+
+        # Кандидаты: скачанные, но не смонтированные
+        videos = [
+            v for v in db.get_videos_by_channel(self.channel_id)
+            if (v.get("status") in ("downloaded", "new"))
+            and v.get("file_path")
+            and os.path.isfile(v.get("file_path"))
+        ]
+        if not videos:
+            self.progress.emit("Нет скачанных видео для монтажа.")
+            self.finished_.emit(0, 0)
+            return
+
+        out_dir = self._resolve_out_dir()
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except OSError as e:
+            self.failed.emit(f"Не удалось создать {out_dir}: {e}")
+            return
+
+        top_path = pick_first_video(self.banner_dir)
+        bot_path = pick_first_video(self.retention_dir)
+        bg_path  = pick_first_video(self.background_dir)
+
+        succeeded = 0
+        failed = 0
+        for v in videos:
+            src = v["file_path"]
+            stem = os.path.splitext(os.path.basename(src))[0]
+            stem = sanitize_dirname(clean_video_name(stem)) or f"video_{v['id']}"
+            out_path = os.path.join(out_dir, f"{stem}.mp4")
+            # если уже смонтировано — пропускаем
+            if os.path.isfile(out_path):
+                self.progress.emit(f"Уже смонтировано: {stem} — пропуск.")
+                try:
+                    db.update_video_status(v["id"], "processed", file_path=out_path)
+                except Exception:
+                    pass
+                succeeded += 1
+                continue
+
+            self.progress.emit(
+                f"Монтаж: «{v.get('title') or stem}» → {out_path}"
+            )
+            try:
+                video_service.stack_videos(
+                    center_path=src,
+                    output_path=out_path,
+                    top_path=top_path,
+                    bottom_path=bot_path,
+                    bg_path=bg_path,
+                )
+                try:
+                    db.update_video_status(v["id"], "processed", file_path=out_path)
+                except Exception as e:
+                    self.progress.emit(f"БД: не удалось обновить статус: {e}")
+                succeeded += 1
+            except Exception as e:
+                log.exception("auto-montage failed for video %s", v.get("id"))
+                self.progress.emit(f"Ошибка монтажа «{stem}»: {e}")
+                failed += 1
+
+        self.finished_.emit(succeeded, failed)
+
+
+# ──────────────────────────────────────────────────────────────────────
 # AUTOMATION PAGE
 # ──────────────────────────────────────────────────────────────────────
 
@@ -294,6 +426,7 @@ class AutomationPage(BasePage):
         self._current_channel: Optional[int] = None
         self._pipeline_running = False
         self._clip_worker: Optional[ClipPrepWorker] = None
+        self._montage_worker: Optional[AutoMontageWorker] = None
         self._auto_timer = QTimer(self)
         self._auto_timer.setInterval(15 * 60 * 1000)  # каждые 15 минут
         self._auto_timer.timeout.connect(self._run_auto_check)
@@ -622,13 +755,49 @@ class AutomationPage(BasePage):
         )
 
     def _run_processing(self):
-        QMessageBox.information(
-            self, "Монтаж",
-            "Монтаж выполняется через существующий video_service.py.\n"
-            "Настройки сохранены; полная автоматизация монтажа будет подключена в "
-            "отдельной итерации — пока используйте страницу «Обработка» для ручной "
-            "композиции или запустите нарезку клипов."
+        """Ручной запуск монтажа на выбранном YouTube-канале.
+        Перед стартом проверяет, что указанные папки существуют и содержат видео."""
+        if not self._current_channel:
+            QMessageBox.information(self, "Нет канала",
+                                    "Сначала выберите YouTube-канал.")
+            return
+        if self._montage_worker and self._montage_worker.isRunning():
+            QMessageBox.information(
+                self, "Идёт монтаж",
+                "Монтаж уже выполняется. Дождитесь завершения."
+            )
+            return
+
+        banner = self.ed_banner.text().strip() or None
+        retention = self.ed_retention.text().strip() or None
+        background = self.ed_background.text().strip() or None
+
+        ok, reason = validate_processing_dirs(banner, retention, background)
+        if not ok:
+            QMessageBox.warning(
+                self, "Некорректные папки монтажа",
+                f"Не удаётся запустить монтаж:\n{reason}\n\n"
+                "Проверьте пути к баннерам / удержанию / фону в блоке «Монтаж»."
+            )
+            return
+
+        self._log(f"Монтаж: канал={self._current_channel}")
+        self._montage_worker = AutoMontageWorker(
+            self._current_channel, banner, retention, background, parent=self
         )
+        self._montage_worker.progress.connect(self._log)
+        self._montage_worker.failed.connect(
+            lambda msg: (
+                self._log(f"Монтаж провалился: {msg}"),
+                QMessageBox.warning(self, "Ошибка монтажа", msg),
+            )
+        )
+        self._montage_worker.finished_.connect(self._on_montage_done)
+        self._montage_worker.start()
+
+    def _on_montage_done(self, succeeded: int, failed: int):
+        self._log(f"Монтаж завершён: успех={succeeded}, ошибок={failed}")
+        self._on_channel_changed()
 
     def _resolve_target_tiktoks(self, ask_if_many: bool = True) -> list[int]:
         """Возвращает id TikTok-каналов, куда раскладывать клипы.
@@ -761,12 +930,35 @@ class AutomationPage(BasePage):
                             self._log(f"Авто: ошибка скачивания: {e}")
 
                     if s.get("processing_enabled"):
-                        # Автоматический монтаж пока не реализован —
-                        # логируем, чтобы пользователь видел пропуск.
-                        self._log(
-                            "Авто: шаг монтажа пропущен (реализуется в "
-                            "отдельной итерации, используйте страницу «Обработка»)."
+                        banner = s.get("banner_dir") or None
+                        retention = s.get("retention_dir") or None
+                        background = s.get("background_dir") or None
+                        ok, reason = validate_processing_dirs(
+                            banner, retention, background
                         )
+                        if not ok:
+                            self._log(
+                                f"Авто-монтаж пропущен для канала "
+                                f"«{ch.get('title') or ch['id']}»: {reason}. "
+                                f"Настройте папки в Автоматизации."
+                            )
+                        elif self._montage_worker and self._montage_worker.isRunning():
+                            self._log(
+                                "Авто: монтаж уже в процессе — пропуск канала."
+                            )
+                        else:
+                            self._log(
+                                f"Авто: запуск монтажа «{ch.get('title') or ch['id']}»"
+                            )
+                            self._montage_worker = AutoMontageWorker(
+                                ch["id"], banner, retention, background, parent=self
+                            )
+                            self._montage_worker.progress.connect(self._log)
+                            self._montage_worker.finished_.connect(self._on_montage_done)
+                            # ждём окончания монтажа, чтобы нарезка шла
+                            # из свежеобработанного
+                            self._montage_worker.start()
+                            self._montage_worker.wait()
 
                     if s.get("publish_enabled"):
                         # Нарезка во все привязанные TikTok без диалога.
