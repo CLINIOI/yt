@@ -185,6 +185,103 @@ class Database:
             )
         """)
 
+        # Миграция: updated_at для пресетов
+        try:
+            cur.execute("ALTER TABLE presets ADD COLUMN updated_at TIMESTAMP")
+            self._commit()
+        except Exception:
+            pass
+
+        # ── TikTok каналы ───────────────────────────────────────────
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS tiktok_channels (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                handle          TEXT    NOT NULL UNIQUE,
+                display_name    TEXT,
+                avatar_url      TEXT,
+                hashtags_json   TEXT    DEFAULT '[]',
+                schedule_json   TEXT    DEFAULT '[]',
+                clip_min_buffer INTEGER DEFAULT 10,
+                enabled         INTEGER DEFAULT 1,
+                created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # ── Связь TikTok ↔ YouTube (N:M) ────────────────────────────
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS tiktok_youtube_link (
+                tiktok_id  INTEGER NOT NULL REFERENCES tiktok_channels(id) ON DELETE CASCADE,
+                youtube_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+                PRIMARY KEY (tiktok_id, youtube_id)
+            )
+        """)
+
+        # ── Готовые клипы ───────────────────────────────────────────
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS clips (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                tiktok_id       INTEGER NOT NULL REFERENCES tiktok_channels(id) ON DELETE CASCADE,
+                source_video_id INTEGER REFERENCES videos(id) ON DELETE SET NULL,
+                file_path       TEXT    NOT NULL,
+                duration        REAL,
+                status          TEXT    DEFAULT 'ready',
+                                 -- ready | published | removed
+                generated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                published_at    TIMESTAMP
+            )
+        """)
+
+        # ── Скрипты публикации ──────────────────────────────────────
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS publish_scripts (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                tiktok_id       INTEGER NOT NULL REFERENCES tiktok_channels(id) ON DELETE CASCADE,
+                clip_id         INTEGER REFERENCES clips(id) ON DELETE CASCADE,
+                title           TEXT,
+                file_path       TEXT,
+                hashtags        TEXT,
+                scheduled_at    TIMESTAMP,
+                caption         TEXT,
+                status          TEXT    DEFAULT 'draft',
+                                 -- draft | marked | done
+                created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # ── Настройки автоматизации (1 к 1 с tiktok_channels) ───────
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS automation_settings (
+                tiktok_id           INTEGER PRIMARY KEY
+                                    REFERENCES tiktok_channels(id) ON DELETE CASCADE,
+                download_enabled    INTEGER DEFAULT 1,
+                min_duration_sec    INTEGER DEFAULT 300,
+                max_duration_sec    INTEGER DEFAULT 1800,
+                max_age_days        INTEGER DEFAULT 7,
+                fallback_popular    INTEGER DEFAULT 1,
+                processing_enabled  INTEGER DEFAULT 1,
+                banner_dir          TEXT,
+                retention_dir       TEXT,
+                background_dir      TEXT,
+                clip_duration_sec   INTEGER DEFAULT 30,
+                publish_enabled     INTEGER DEFAULT 1,
+                updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # ── Приложение (ключ-значение для настроек) ─────────────────
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key         TEXT PRIMARY KEY,
+                value       TEXT,
+                updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # ── Индексы ────────────────────────────────────────────────
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_clips_tiktok ON clips(tiktok_id, status)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_scripts_tiktok ON publish_scripts(tiktok_id, status)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_videos_channel_status ON videos(channel_id, status)")
+
         self._commit()
 
     # ─────────────────────────────────────────────────────────────────
